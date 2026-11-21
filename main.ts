@@ -332,8 +332,9 @@ function fitCohortModel(
     const mse = wErr / Math.max(1e-6, sw);
     const lp = Math.log(pMax / Math.max(1e-4, 1 - pMax));
     const lt = Math.log(tau50);
-    // Regularize gently so sparse histories don't produce extreme parameters
-    const reg = 0.045 * (lp - priorLogP) ** 2 + 0.065 * (lt - priorLogTau) ** 2;
+    // Decay prior regularization as real multi-refresh observations accumulate
+    const regScale = 4.5 / (obs.length + 3.5);
+    const reg = regScale * (0.045 * (lp - priorLogP) ** 2 + 0.065 * (lt - priorLogTau) ** 2);
     return { obj: mse + reg, rmse: Math.sqrt(mse) };
   };
 
@@ -430,6 +431,13 @@ function forecastPreRefreshRegime(c: Case, refreshes: RefreshPoint[]): Array<{ i
   const nTarget = last.players * expectedMult;
   const newPlayers = Math.max(0, nTarget - last.players);
 
+  // Median baseline pre-launch earner count across non-prologue trophies
+  const nonPrologueK = c.trophies
+    .map((_, idx) => Math.max(1, Math.round((clampPct(last.rates[idx] ?? 0.5) / 100) * last.players)))
+    .filter((k) => k < last.players * 0.5)
+    .sort((a, b) => a - b);
+  const baseK = nonPrologueK[Math.floor(nonPrologueK.length * 0.45)] ?? 5;
+
   return c.trophies.map((t, i) => {
     const r0 = clampPct(last.rates[i] ?? 0.5);
     const arch = classifyTrophy(t);
@@ -442,22 +450,29 @@ function forecastPreRefreshRegime(c: Case, refreshes: RefreshPoint[]): Array<{ i
 
     // Reconstruct exact integer pre-launch earner count from 2-decimal Exophase rate
     const k0 = Math.max(1, Math.round((r0 / 100) * last.players));
+    const excessK = Math.max(0, k0 - baseK);
     const isEarlyUnlockable =
-      arch === 'ch1' || arch === 'story_early' || arch === 'easy_misc' || arch === 'mid_misc';
-    // Late/grind/platinum trophies cannot realistically be completed by brand-new launch-night
-    // players in the first ~4.5h, so their earner count stays nearly constant under pool dilution.
-    const expectedNewEarners = isEarlyUnlockable
-      ? newPlayers * prior.launchInflow * 0.45
-      : 0.05;
-    const expectedCount = k0 + expectedNewEarners;
+      arch === 'ch1' || arch === 'story_early' || arch === 'easy_misc';
+    const isMidUnlockable = arch === 'ch2' || arch === 'story_mid' || arch === 'mid_misc';
+
+    // Combine archetype launch-inflow prior with observed pre-launch excess earners (empirical ease signal)
+    const priorInflow = isEarlyUnlockable
+      ? newPlayers * prior.launchInflow * 1.4
+      : isMidUnlockable
+        ? newPlayers * prior.launchInflow * 0.9 + 0.35
+        : 0.25;
+    const excessInflow = excessK * (isEarlyUnlockable ? 1.8 : 0.65);
+    const expectedCount = k0 + priorInflow + excessInflow;
     const predRate = clampPct((100 * expectedCount) / nTarget);
     const medLogit = logit(predRate);
 
-    // Sharp, count-consistent spread: reflects 2-decimal rounding + Poisson +/-1 count jitter
-    const poissonJitter = 0.05 / Math.sqrt(k0);
+    // Properly calibrated launch-night spread covering discrete +1/+2 earner jumps and pool-size uncertainty
+    const poissonJitter = 0.22 / Math.sqrt(k0);
     const spread = isEarlyUnlockable
-      ? (arch === 'ch1' || arch === 'easy_misc' ? 0.16 : 0.12) + poissonJitter
-      : 0.065 + poissonJitter;
+      ? 0.36 + 0.03 * excessK + poissonJitter
+      : isMidUnlockable
+        ? 0.24 + 0.02 * excessK + poissonJitter
+        : 0.16 + poissonJitter;
 
     const q = Q_MULT.map((m) => round4(clampPct(invLogit(medLogit + m * spread))));
     for (let k = 1; k < q.length; k++) {
@@ -555,18 +570,21 @@ function forecastCase(c: Case): Array<{ id: number; q: number[] }> {
 
   // Empirical backtest calibration on the case's own history (if >= 4 post-launch refreshes)
   let empScale = 1.0;
+  let empBias = 0.0;
   if (activeRefreshes.length >= 4) {
     const splitIdx = Math.max(2, Math.floor(activeRefreshes.length * 0.65));
     const trainEnd = activeRefreshes[splitIdx - 1]!;
     const testEnd = activeRefreshes[activeRefreshes.length - 1]!;
     const btDx = Math.max(0.05, testEnd.logTime - trainEnd.logTime);
-    let absErrSum = 0;
-    let absErrCnt = 0;
+    const btDLogN = Math.max(0, Math.log(Math.max(1, testEnd.players) / Math.max(1, trainEnd.players)));
+    const btDtH = Math.max(0.5, testEnd.hours - trainEnd.hours);
+    const btAvgN = 0.5 * (trainEnd.players + testEnd.players);
+    const btResids: number[] = [];
     for (let i = 0; i < nTrophies; i++) {
       const actualR = testEnd.rates[i];
       const baseR = trainEnd.rates[i];
       if (actualR === null || actualR === undefined || baseR === null || baseR === undefined) continue;
-      if (baseR >= 99.0 || baseR <= 0.02) continue;
+      if (baseR >= 98.5 || baseR <= 0.02) continue;
       const subObs: Array<{ logTime: number; logitVal: number; weight: number }> = [];
       for (let k = 0; k < splitIdx; k++) {
         const rk = activeRefreshes[k]!;
@@ -576,16 +594,33 @@ function forecastCase(c: Case): Array<{ id: number; q: number[] }> {
         }
       }
       const subFit = fitWeightedLogTrend(subObs);
-      const slope = subFit ? Math.max(-1.5, Math.min(2.2, subFit.slope * 0.7)) : 0;
-      const pred = logit(baseR) + slope * btDx;
-      absErrSum += Math.abs(logit(actualR) - pred);
-      absErrCnt += 1;
+      const slope = subFit ? Math.max(-1.5, Math.min(2.2, subFit.slope * 0.78)) : 0;
+      const trendP = logit(baseR) + slope * btDx;
+      // Blend with count-velocity projection on the holdout window
+      let velP = trendP;
+      const ref0 = activeRefreshes[0]!;
+      const r0v = ref0.rates[i];
+      const obsH = Math.max(0.5, trainEnd.hours - ref0.hours);
+      if (r0v !== null && r0v !== undefined) {
+        const c0 = (clampPct(r0v) / 100) * ref0.players;
+        const c1 = (clampPct(baseR) / 100) * trainEnd.players;
+        const haz = Math.max(0, c1 - c0) / (Math.max(1, 0.5 * (ref0.players + trainEnd.players)) * obsH);
+        const projC = c1 + haz * btAvgN * btDtH * Math.pow(Math.max(1, trainEnd.hours) / Math.max(1, testEnd.hours), 0.2);
+        velP = logit(clampPct((100 * projC) / Math.max(1, testEnd.players)));
+      }
+      const pred = btDLogN > 0.01 ? 0.55 * trendP + 0.45 * velP : trendP;
+      btResids.push(logit(actualR) - pred);
     }
-    if (absErrCnt >= 10) {
-      const maePerRootDx = (absErrSum / absErrCnt) / Math.sqrt(btDx);
+    if (btResids.length >= 10) {
+      btResids.sort((a, b) => a - b);
+      const medResid = btResids[Math.floor(btResids.length / 2)]!;
+      const absErrs = btResids.map((e) => Math.abs(e - medResid));
+      const maePerRootDx = (absErrs.reduce((a, b) => a + b, 0) / absErrs.length) / Math.sqrt(btDx);
       // Expected Gaussian MAE is sqrt(2/pi) * sigma ≈ 0.798 * sigma
       const impliedSigmaPerRootDx = maePerRootDx / 0.798;
-      empScale = Math.max(0.75, Math.min(1.65, impliedSigmaPerRootDx / 0.42));
+      empScale = Math.max(0.70, Math.min(1.55, impliedSigmaPerRootDx / 0.36));
+      // Gentle bias correction scaled to horizon ratio and capped conservatively
+      empBias = Math.max(-0.10, Math.min(0.10, (medResid / Math.max(0.15, btDx)) * 0.25));
     }
   }
 
@@ -680,7 +715,10 @@ function forecastCase(c: Case): Array<{ id: number; q: number[] }> {
       medLogit = 0.34 * cohortFit.predLogit + 0.22 * countVelPred + 0.24 * trendPred + 0.20 * elastPred;
     }
 
-    // Enforce physical earner-count floor (cannot drop faster than pure dilution of existing earners)
+    // Apply gentle empirical holdout bias correction and enforce physical earner-count floor
+    if (arch !== 'prologue') {
+      medLogit += empBias * Math.min(1.0, dxTarget);
+    }
     medLogit = Math.max(countFloorLogit, Math.max(logit(0.01), Math.min(logit(99.99), medLogit)));
     medians[i] = medLogit;
 
@@ -688,20 +726,20 @@ function forecastCase(c: Case): Array<{ id: number; q: number[] }> {
     const viewMax = Math.max(cohortFit.predLogit, countVelPred, trendPred, elastPred);
     const viewMin = Math.min(cohortFit.predLogit, countVelPred, trendPred, elastPred);
     const viewSpread = viewMax - viewMin;
-    const baseLogitSd = 0.30 * empScale * Math.sqrt(dxTarget);
+    const baseLogitSd = 0.27 * empScale * Math.sqrt(dxTarget);
     const predCount = Math.max(1, (invLogit(medLogit) / 100) * traj.nTarget);
-    const poissonSd = 0.55 / Math.sqrt(predCount);
-    const refreshJitter = 0.10 * (medianGapH / Math.max(24, targetHours));
-    const highRateTighten = lastRate >= 95.0 ? 0.50 : 1.0;
+    const poissonSd = 0.50 / Math.sqrt(predCount);
+    const refreshJitter = 0.08 * (medianGapH / Math.max(24, targetHours));
+    const highRateTighten = lastRate >= 95.0 ? 0.45 : 1.0;
     const combinedSd = Math.sqrt(
       baseLogitSd ** 2 +
-      (0.50 * residSd * Math.sqrt(1 + dxTarget)) ** 2 +
-      (0.26 * viewSpread) ** 2 +
+      (0.45 * residSd * Math.sqrt(1 + dxTarget)) ** 2 +
+      (0.24 * viewSpread) ** 2 +
       poissonSd ** 2 +
       refreshJitter ** 2,
     ) * highRateTighten;
 
-    spreads[i] = Math.max(0.11, Math.min(1.15, combinedSd));
+    spreads[i] = Math.max(0.10, Math.min(1.10, combinedSd));
   }
 
   // Macro trophies_earned consistency anchor (soft pull when multi-refresh history shows clear macro trend)
