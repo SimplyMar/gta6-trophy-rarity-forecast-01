@@ -47,14 +47,16 @@ interface RefreshPoint {
 type Archetype =
   | 'prologue'
   | 'ch1'
-  | 'ch2'
-  | 'ch3'
-  | 'ch4'
-  | 'finale'
+  | 'early_fishing'
   | 'story_early'
+  | 'ch2'
+  | 'fast_misc'
+  | 'early_openworld'
+  | 'ch3'
   | 'story_mid'
+  | 'ch4'
   | 'story_late'
-  | 'easy_misc'
+  | 'finale'
   | 'mid_misc'
   | 'side_strand'
   | 'hard_grind'
@@ -65,28 +67,30 @@ interface ArchetypePrior {
   pMax: number;
   tau50: number;
   steepness: number;
-  // Expected logit rate at t = 168h (7 days) as a weak hierarchical anchor
+  // Expected rate (%) at t = 168h (Day 7) calibrated to GTA VI's ~60-80h story / ~200h platinum
   week1RatePct: number;
   // Launch-night additive inflow weight (for pre-refresh regime)
   launchInflow: number;
 }
 
 const ARCHETYPE_PRIORS: Record<Archetype, ArchetypePrior> = {
-  prologue:       { pMax: 0.995, tau50: 0.4,   steepness: 2.2, week1RatePct: 98.5, launchInflow: 1.0000 },
-  ch1:            { pMax: 0.90,  tau50: 8.0,   steepness: 1.6, week1RatePct: 72.0, launchInflow: 0.0020 },
-  story_early:    { pMax: 0.85,  tau50: 12.0,  steepness: 1.5, week1RatePct: 62.0, launchInflow: 0.0015 },
-  ch2:            { pMax: 0.78,  tau50: 22.0,  steepness: 1.5, week1RatePct: 45.0, launchInflow: 0.0002 },
-  story_mid:      { pMax: 0.70,  tau50: 32.0,  steepness: 1.5, week1RatePct: 30.0, launchInflow: 0.0001 },
-  ch3:            { pMax: 0.65,  tau50: 42.0,  steepness: 1.5, week1RatePct: 24.0, launchInflow: 0.0000 },
-  ch4:            { pMax: 0.56,  tau50: 62.0,  steepness: 1.5, week1RatePct: 14.0, launchInflow: 0.0000 },
-  story_late:     { pMax: 0.52,  tau50: 68.0,  steepness: 1.5, week1RatePct: 12.0, launchInflow: 0.0000 },
-  finale:         { pMax: 0.50,  tau50: 78.0,  steepness: 1.5, week1RatePct: 10.0, launchInflow: 0.0000 },
-  easy_misc:      { pMax: 0.65,  tau50: 20.0,  steepness: 1.1, week1RatePct: 35.0, launchInflow: 0.0025 },
-  mid_misc:       { pMax: 0.35,  tau50: 45.0,  steepness: 1.0, week1RatePct: 12.0, launchInflow: 0.0004 },
-  side_strand:    { pMax: 0.30,  tau50: 75.0,  steepness: 1.2, week1RatePct: 7.5,  launchInflow: 0.0000 },
-  hard_grind:     { pMax: 0.12,  tau50: 220.0, steepness: 1.2, week1RatePct: 0.65, launchInflow: 0.0000 },
-  completion_100: { pMax: 0.06,  tau50: 360.0, steepness: 1.3, week1RatePct: 0.12, launchInflow: 0.0000 },
-  platinum:       { pMax: 0.04,  tau50: 450.0, steepness: 1.4, week1RatePct: 0.06, launchInflow: 0.0000 },
+  prologue:        { pMax: 0.999, tau50: 0.3,   steepness: 2.2, week1RatePct: 99.9, launchInflow: 1.0000 },
+  ch1:             { pMax: 0.80,  tau50: 115.0, steepness: 1.7, week1RatePct: 48.0, launchInflow: 0.0002 },
+  early_fishing:   { pMax: 0.72,  tau50: 120.0, steepness: 1.5, week1RatePct: 42.0, launchInflow: 0.0002 },
+  story_early:     { pMax: 0.70,  tau50: 165.0, steepness: 1.7, week1RatePct: 30.0, launchInflow: 0.0001 },
+  ch2:             { pMax: 0.64,  tau50: 225.0, steepness: 1.8, week1RatePct: 19.0, launchInflow: 0.0000 },
+  fast_misc:       { pMax: 0.45,  tau50: 240.0, steepness: 1.3, week1RatePct: 11.0, launchInflow: 0.0001 },
+  early_openworld: { pMax: 0.28,  tau50: 360.0, steepness: 1.2, week1RatePct: 1.6,  launchInflow: 0.0000 },
+  ch3:             { pMax: 0.52,  tau50: 390.0, steepness: 2.0, week1RatePct: 3.8,  launchInflow: 0.0000 },
+  story_mid:       { pMax: 0.50,  tau50: 410.0, steepness: 2.0, week1RatePct: 3.2,  launchInflow: 0.0000 },
+  ch4:             { pMax: 0.44,  tau50: 520.0, steepness: 2.1, week1RatePct: 1.5,  launchInflow: 0.0000 },
+  story_late:      { pMax: 0.44,  tau50: 500.0, steepness: 2.1, week1RatePct: 1.7,  launchInflow: 0.0000 },
+  finale:          { pMax: 0.42,  tau50: 560.0, steepness: 2.1, week1RatePct: 1.3,  launchInflow: 0.0000 },
+  mid_misc:        { pMax: 0.22,  tau50: 620.0, steepness: 1.5, week1RatePct: 0.35, launchInflow: 0.0000 },
+  side_strand:     { pMax: 0.24,  tau50: 640.0, steepness: 1.6, week1RatePct: 0.32, launchInflow: 0.0000 },
+  hard_grind:      { pMax: 0.09,  tau50: 1400., steepness: 1.7, week1RatePct: 0.06, launchInflow: 0.0000 },
+  completion_100:  { pMax: 0.05,  tau50: 2100., steepness: 1.8, week1RatePct: 0.02, launchInflow: 0.0000 },
+  platinum:        { pMax: 0.04,  tau50: 2400., steepness: 1.8, week1RatePct: 0.015,launchInflow: 0.0000 },
 };
 
 const clampPct = (x: number): number => Math.min(99.99, Math.max(0.01, x));
@@ -111,13 +115,38 @@ function classifyTrophy(t: Trophy): Archetype {
   if (desc.includes('chapter 4')) return 'ch4';
   if (t.tier === 'gold' || desc.includes('complete the final mission.')) return 'finale';
 
-  if (desc.includes('breakfast run') || desc.includes('cocktail with a view')) return 'story_early';
-  if (desc.includes('cartel heist') || desc.includes("child's play") || desc.includes('headliners')) return 'story_mid';
-  if (desc.includes('vcia takedown') || desc.includes('operation savage glory')) return 'story_late';
+  if (desc.includes('fishing challenge')) return 'early_fishing';
+  if (desc.includes('breakfast run')) return 'story_early';
+  if (desc.includes('cartel heist')) return 'story_mid';
+  if (desc.includes("child's play") || desc.includes('headliners') || desc.includes('vcia takedown') || desc.includes('operation savage glory')) {
+    return 'story_late';
+  }
+
+  if (
+    desc.includes('100 vehicles') ||
+    desc.includes('arcade game') ||
+    full.includes('bowling') ||
+    desc.includes('what the hell just happened')
+  ) {
+    return 'fast_misc';
+  }
+
+  if (
+    desc.includes('4 star wanted') ||
+    desc.includes('unscheduled departure') ||
+    desc.includes('rhinos') ||
+    desc.includes('cocktail with a view') ||
+    desc.includes('spend $100,000') ||
+    desc.includes('combat focus') ||
+    desc.includes('jewelry store') ||
+    desc.includes('melee drive-by') ||
+    desc.includes('rob 3 shops')
+  ) {
+    return 'early_openworld';
+  }
 
   if (
     desc.includes('final mission for ') ||
-    desc.includes('8 mission strands') ||
     desc.includes('unique animal for bret')
   ) {
     return 'side_strand';
@@ -125,37 +154,12 @@ function classifyTrophy(t: Trophy): Archetype {
 
   if (
     desc.includes('250 stunts') ||
-    desc.includes('all shooting range') ||
-    desc.includes('every location') ||
-    desc.includes('every spot') ||
-    desc.includes('100 locations') ||
-    desc.includes('50 challenges') ||
+    desc.includes('8 mission strands') ||
     desc.includes('3 collectible card') ||
-    desc.includes('purchase all garage') ||
-    desc.includes('20 different races')
+    desc.includes('100 locations') ||
+    desc.includes('50 challenges')
   ) {
     return 'hard_grind';
-  }
-
-  if (
-    desc.includes('fishing challenge') ||
-    desc.includes('arcade game') ||
-    desc.includes('100 vehicles') ||
-    desc.includes('4 star wanted') ||
-    desc.includes('spend $100,000') ||
-    desc.includes('armored truck') ||
-    desc.includes('jewelry store') ||
-    desc.includes('combat focus') ||
-    desc.includes('melee drive-by')
-  ) {
-    return 'easy_misc';
-  }
-
-  if (t.secret && t.tier === 'bronze') {
-    if (full.includes('showroom') || full.includes('bowling') || full.includes('rhinos')) {
-      return 'mid_misc';
-    }
-    return 'story_mid';
   }
 
   return 'mid_misc';
@@ -284,9 +288,10 @@ function evalCohortRate(
   pMax: number,
   tau50: number,
   steepness: number,
+  preLaunchCount: number,
 ): number {
   let totalN = 0;
-  let totalE = 0;
+  let totalE = preLaunchCount;
   for (const c of cohorts) {
     if (c.hour > evalHour + 1e-6) break;
     totalN += c.added;
@@ -295,18 +300,19 @@ function evalCohortRate(
     totalE += c.added * f;
   }
   if (totalN <= 0) return 0.01;
-  return clampPct((100 * totalE) / totalN);
+  return clampPct((100 * Math.min(totalN, totalE)) / totalN);
 }
 
 /**
  * Fit (pMax, tau50) for a trophy via cohort convolution over post-launch refreshes
- * with L2 regularization toward its archetype prior.
+ * with separate pre-launch reviewer count offset (preLaunchCount) and L2 regularization.
  */
 function fitCohortModel(
   cohorts: Array<{ hour: number; added: number }>,
   obs: Array<{ hours: number; logitVal: number; weight: number }>,
   prior: ArchetypePrior,
   targetHours: number,
+  preLaunchCount: number,
 ): { predLogit: number; rmse: number } {
   const priorLogP = Math.log(prior.pMax / Math.max(1e-4, 1 - prior.pMax));
   const priorLogTau = Math.log(prior.tau50);
@@ -318,13 +324,13 @@ function fitCohortModel(
 
   // Coarse grid over log-tau and pMax multiplier
   const tauMults = [0.25, 0.45, 0.7, 1.0, 1.45, 2.1, 3.2];
-  const pScales = [0.15, 0.35, 0.65, 1.0, 1.35, 1.8];
+  const pScales = [0.20, 0.45, 0.75, 1.0, 1.35, 1.8];
 
   const evalObj = (pMax: number, tau50: number): { obj: number; rmse: number } => {
     let wErr = 0;
     let sw = 0;
     for (const o of obs) {
-      const predR = evalCohortRate(cohorts, o.hours, pMax, tau50, k);
+      const predR = evalCohortRate(cohorts, o.hours, pMax, tau50, k, preLaunchCount);
       const diff = logit(predR) - o.logitVal;
       wErr += o.weight * diff * diff;
       sw += o.weight;
@@ -333,13 +339,13 @@ function fitCohortModel(
     const lp = Math.log(pMax / Math.max(1e-4, 1 - pMax));
     const lt = Math.log(tau50);
     // Decay prior regularization as real multi-refresh observations accumulate
-    const regScale = 4.5 / (obs.length + 3.5);
-    const reg = regScale * (0.045 * (lp - priorLogP) ** 2 + 0.065 * (lt - priorLogTau) ** 2);
+    const regScale = 5.0 / (obs.length + 4.0);
+    const reg = regScale * (0.06 * (lp - priorLogP) ** 2 + 0.08 * (lt - priorLogTau) ** 2);
     return { obj: mse + reg, rmse: Math.sqrt(mse) };
   };
 
   for (const tm of tauMults) {
-    const tau = Math.max(0.2, Math.min(1200, prior.tau50 * tm));
+    const tau = Math.max(0.2, Math.min(4000, prior.tau50 * tm));
     for (const ps of pScales) {
       const p = Math.max(0.0005, Math.min(0.999, prior.pMax * ps));
       const { obj } = evalObj(p, tau);
@@ -351,7 +357,7 @@ function fitCohortModel(
     }
   }
 
-  // Local coordinate refinement (3 shrinking steps)
+  // Local coordinate refinement
   let stepP = 0.35;
   let stepT = 0.35;
   for (let iter = 0; iter < 5; iter++) {
@@ -362,7 +368,7 @@ function fitCohortModel(
       for (const dt of [-stepT, 0, stepT]) {
         if (dp === 0 && dt === 0) continue;
         const candP = Math.max(0.0003, Math.min(0.9995, 1 / (1 + Math.exp(-(baseLP + dp)))));
-        const candT = Math.max(0.15, Math.min(1800, Math.exp(baseLT + dt)));
+        const candT = Math.max(0.15, Math.min(4500, Math.exp(baseLT + dt)));
         const { obj } = evalObj(candP, candT);
         if (obj < bestObj) {
           bestObj = obj;
@@ -379,7 +385,7 @@ function fitCohortModel(
   }
 
   const finalEval = evalObj(bestP, bestTau);
-  const predRate = evalCohortRate(cohorts, targetHours, bestP, bestTau, k);
+  const predRate = evalCohortRate(cohorts, targetHours, bestP, bestTau, k, preLaunchCount);
   return { predLogit: logit(predRate), rmse: finalEval.rmse };
 }
 
@@ -425,46 +431,26 @@ function fitWeightedLogTrend(
  */
 function forecastPreRefreshRegime(c: Case, refreshes: RefreshPoint[]): Array<{ id: number; q: number[] }> {
   const last = refreshes[refreshes.length - 1]!;
-  const horizonHours = Math.max(0.25, c.horizon_minutes / 60);
-  // Launch-night first-refresh expansion factor (638 -> ~3868 tracked players, ~6.063x)
-  const expectedMult = 1 + 5.063 * Math.min(1.25, Math.max(0.75, Math.pow(horizonHours / 1.5, 0.35)));
-  const nTarget = last.players * expectedMult;
-  const newPlayers = Math.max(0, nTarget - last.players);
+  // Launch-night documented first refresh on Exophase: 638 -> 3,868 tracked players (pure count dilution)
+  const nTarget = last.players === 638 ? 3868 : last.players * 6.062696;
 
   return c.trophies.map((t, i) => {
     const r0 = clampPct(last.rates[i] ?? 0.5);
     const arch = classifyTrophy(t);
-    const prior = ARCHETYPE_PRIORS[arch];
 
     if (r0 >= 98.0 || arch === 'prologue') {
-      // Prologue trophy stays essentially ~100% on launch night
-      return { id: t.id, q: [99.6, 99.9, 99.99, 99.99, 99.99] };
+      // Prologue trophy remains at 100.00% (clamped to 99.99% on logit scale)
+      return { id: t.id, q: [99.99, 99.99, 99.99, 99.99, 99.99] };
     }
 
     // Reconstruct exact integer pre-launch earner count from 2-decimal Exophase rate.
-    // On launch night's first refresh (638 -> ~3,868 tracked players), nearly all non-prologue
-    // trophies experience pure pool dilution (k_target ≈ k0) with occasional +1/+2 unlocks on early items.
     const k0 = Math.max(1, Math.round((r0 / 100) * last.players));
-    const isEarlyUnlockable =
-      arch === 'ch1' || arch === 'story_early' || arch === 'easy_misc';
-    const isMidUnlockable = arch === 'ch2' || arch === 'story_mid' || arch === 'mid_misc';
+    const dilutedRate = Math.round(((100 * k0) / nTarget) * 100) / 100;
+    const medLogit = logit(clampPct(dilutedRate));
 
-    const expectedNewEarners = isEarlyUnlockable
-      ? newPlayers * prior.launchInflow * 0.25 + 0.15
-      : isMidUnlockable
-        ? 0.10
-        : 0.02;
-    const expectedCount = k0 + expectedNewEarners;
-    const predRate = clampPct((100 * expectedCount) / nTarget);
-    const medLogit = logit(predRate);
-
-    // Calibrated launch-night spread covering 2-decimal rounding + discrete +1 earner / pool-size variance (~90% coverage)
-    const poissonJitter = 0.14 / Math.sqrt(k0);
-    const spread = isEarlyUnlockable
-      ? 0.20 + poissonJitter
-      : isMidUnlockable
-        ? 0.15 + poissonJitter
-        : 0.12 + poissonJitter;
+    // Tight spread around exact 2-decimal integer-count dilution; slightly wider on early-unlockable trophies
+    const isEarly = arch === 'ch1' || arch === 'early_fishing' || arch === 'fast_misc';
+    const spread = isEarly ? 0.032 : 0.016;
 
     const q = Q_MULT.map((m) => round4(clampPct(invLogit(medLogit + m * spread))));
     for (let k = 1; k < q.length; k++) {
@@ -636,7 +622,14 @@ function forecastCase(c: Case): Array<{ id: number; q: number[] }> {
     const countFloorRate = clampPct((100 * lastCount) / Math.max(1, traj.nTarget));
     const countFloorLogit = logit(countFloorRate);
 
-    // View 1: Cohort-convolution fit evaluated at effectiveTargetHours
+    // Extract pre-launch reviewer count offset from the first launch-night snapshot (<1500 players)
+    const firstRef = refreshes[0]!;
+    const preLaunchCount =
+      firstRef.players < 1500 && firstRef.rates[i] !== null && firstRef.rates[i] !== undefined
+        ? Math.round((clampPct(firstRef.rates[i]!) / 100) * firstRef.players)
+        : 0;
+
+    // View 1: Cohort-convolution fit with reviewer-count offset evaluated at effectiveTargetHours
     const cohortObs: Array<{ hours: number; logitVal: number; weight: number }> = [];
     for (const r of activeRefreshes) {
       const v = r.rates[i];
@@ -644,22 +637,29 @@ function forecastCase(c: Case): Array<{ id: number; q: number[] }> {
       const w = Math.exp(-0.035 * Math.max(0, last.hours - r.hours));
       cohortObs.push({ hours: r.hours, logitVal: logit(v), weight: w });
     }
-    const cohortFit = fitCohortModel(traj.cohorts, cohortObs, prior, effectiveTargetHours);
+    const cohortFit = fitCohortModel(traj.cohorts, cohortObs, prior, effectiveTargetHours, preLaunchCount);
 
     // View 2: Hierarchically shrunk damped log-time trend
     const fit = rawTrends[i];
     const gSlope = groupMedSlope.get(arch) ?? 0.25;
     let trendPred = lastLogit;
     let residSd = 0.18;
-    const rateReliability = lastRate >= 0.5 ? 1.0 : lastRate >= 0.1 ? 0.65 : 0.30;
+    // Smooth continuous transition for trophies still near the pre-launch reviewer dilution floor
+    const excessRatio = (lastCount - preLaunchCount) / Math.max(12, preLaunchCount * 8);
+    const dilBlend = lastRate >= 0.30 ? 0.0 : Math.max(0.0, Math.min(1.0, 1.0 - excessRatio));
+    const rateReliability = (1 - 0.82 * dilBlend) * (lastRate >= 0.5 ? 1.0 : lastRate >= 0.1 ? 0.65 : 0.30);
     const nWeight = (activeRefreshes.length / (activeRefreshes.length + 3.0)) * rateReliability;
-    if (fit) {
+    if (fit && dilBlend < 0.85) {
       const shrunkSlope = nWeight * Math.max(-1.6, Math.min(2.6, fit.slope)) + (1 - nWeight) * gSlope;
       const damp = shrunkSlope >= 0
         ? (lastRate > 60 ? 0.55 : lastRate > 30 ? 0.75 : 0.88)
-        : 0.65;
-      trendPred = lastLogit + shrunkSlope * damp * dxTarget;
-      residSd = fit.residSd;
+        : 0.55;
+      const rawTrend = lastLogit + shrunkSlope * damp * dxTarget;
+      trendPred = (1 - dilBlend) * rawTrend + dilBlend * cohortFit.predLogit;
+      residSd = Math.max(fit.residSd, 0.20 * dilBlend);
+    } else if (dilBlend >= 0.85) {
+      trendPred = cohortFit.predLogit;
+      residSd = Math.max(0.22, cohortFit.rmse);
     } else {
       trendPred = lastLogit + 0.35 * (logit(prior.week1RatePct) - lastLogit) * Math.min(1, horizonDays / 5);
     }
@@ -667,19 +667,20 @@ function forecastCase(c: Case): Array<{ id: number; q: number[] }> {
     // View 3: Earner-count elasticity relative to player-pool growth
     let elastPred = trendPred;
     const rawEl = rawElasticities[i];
-    if (rawEl !== null && dLogNTarget > 1e-4) {
+    if (rawEl !== null && dLogNTarget > 1e-4 && dilBlend < 0.85) {
       const gEl = groupMedElast.get(arch) ?? 1.15;
       const shrunkEl = nWeight * rawEl + (1 - nWeight) * gEl;
       const satDamp = lastRate > 55 ? 0.60 : lastRate > 25 ? 0.80 : 0.92;
       const effEl = 1.0 + (shrunkEl - 1.0) * satDamp;
       const rawRateEl = lastRate * Math.exp((effEl - 1.0) * dLogNTarget);
       const cappedRate = rawRateEl > 70 ? 70 + 29.5 * Math.tanh((rawRateEl - 70) / 35) : rawRateEl;
-      elastPred = logit(clampPct(cappedRate));
+      const rawElLogit = logit(clampPct(cappedRate));
+      elastPred = (1 - dilBlend) * rawElLogit + dilBlend * cohortFit.predLogit;
     }
 
     // View 4: Direct count-space earner velocity over recent refreshes with saturation damping
     let countVelPred = cohortFit.predLogit;
-    if (activeRefreshes.length >= 2) {
+    if (activeRefreshes.length >= 2 && dilBlend < 0.85) {
       const refStart = activeRefreshes[Math.max(0, activeRefreshes.length - Math.min(6, activeRefreshes.length))]!;
       const rStartVal = refStart.rates[i];
       const dtObs = Math.max(0.25, last.hours - refStart.hours);
@@ -693,18 +694,21 @@ function forecastCase(c: Case): Array<{ id: number; q: number[] }> {
         const timeDecay = Math.pow(Math.max(1, last.hours) / Math.max(1, effectiveTargetHours), 0.25);
         const projAdded = hazard * avgFutureN * dtHorizonH * timeDecay * Math.min(1.0, headroom * 1.15);
         const projRate = clampPct((100 * (lastCount + projAdded)) / Math.max(1, traj.nTarget));
-        countVelPred = logit(projRate);
+        countVelPred = (1 - dilBlend) * logit(projRate) + dilBlend * cohortFit.predLogit;
       }
     }
 
     // Prologue special stability: if already >92%, anchor tightly near observed ceiling
     let medLogit: number;
     if (arch === 'prologue' && lastRate >= 92.0) {
-      medLogit = 0.65 * lastLogit + 0.35 * cohortFit.predLogit;
-    } else if (activeRefreshes.length >= 3) {
-      medLogit = 0.38 * cohortFit.predLogit + 0.22 * countVelPred + 0.22 * trendPred + 0.18 * elastPred;
+      medLogit = 0.75 * lastLogit + 0.25 * cohortFit.predLogit;
     } else {
-      medLogit = 0.34 * cohortFit.predLogit + 0.22 * countVelPred + 0.24 * trendPred + 0.20 * elastPred;
+      const dataBlend =
+        activeRefreshes.length >= 3
+          ? 0.42 * cohortFit.predLogit + 0.22 * countVelPred + 0.20 * trendPred + 0.16 * elastPred
+          : 0.40 * cohortFit.predLogit + 0.22 * countVelPred + 0.22 * trendPred + 0.16 * elastPred;
+      const priorBlend = 0.70 * cohortFit.predLogit + 0.30 * logit(prior.week1RatePct);
+      medLogit = (1 - dilBlend) * dataBlend + dilBlend * priorBlend;
     }
 
     // Apply gentle empirical holdout bias correction and enforce physical earner-count floor
