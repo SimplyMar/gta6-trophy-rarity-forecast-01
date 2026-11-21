@@ -4,8 +4,8 @@ import { join } from 'node:path';
 const INPUT_DIR = process.env.MAKEFUN_INPUT_DIR ?? '/input';
 const OUTPUT_DIR = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 const LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95];
-// Calibrated Student-t (df=8) normalized quantiles: sharp IQR and accurate 5%/95% pinball tails.
-const Q_MULT = [-1.68, -0.67, 0.0, 0.67, 1.68];
+// Student-t (df=10) quantile multipliers for robust 5%/95% tail pinball calibration.
+const Q_MULT = [-1.72, -0.68, 0.0, 0.68, 1.72];
 const LAUNCH_MS = Date.parse('2026-11-19T00:00:00Z');
 
 interface Trophy {
@@ -47,17 +47,16 @@ interface RefreshPoint {
 type Archetype =
   | 'prologue'
   | 'ch1'
-  | 'early_fishing'
-  | 'story_early'
+  | 'story_ch2_mid'
   | 'ch2'
-  | 'fast_misc'
-  | 'early_openworld'
+  | 'story_ch3_mid'
   | 'ch3'
-  | 'story_mid'
+  | 'story_ch4_mid'
   | 'ch4'
-  | 'story_late'
+  | 'story_ch5_mid'
   | 'finale'
-  | 'mid_misc'
+  | 'early_activity'
+  | 'mid_activity'
   | 'side_strand'
   | 'hard_grind'
   | 'completion_100'
@@ -66,103 +65,102 @@ type Archetype =
 interface ArchetypePrior {
   pMax: number;
   tau50: number;
-  steepness: number;
-  // Expected rate (%) at t = 168h (Day 7) calibrated to GTA VI's ~60-80h story / ~200h platinum
-  week1RatePct: number;
-  // Launch-night additive inflow weight (for pre-refresh regime)
-  launchInflow: number;
+  k: number;
 }
 
+// Calibrated to GTA VI PS5 (~60-80h story, ~200-250h platinum; weak regularization so f00 data dominates)
 const ARCHETYPE_PRIORS: Record<Archetype, ArchetypePrior> = {
-  prologue:        { pMax: 0.999, tau50: 0.3,   steepness: 2.2, week1RatePct: 99.9, launchInflow: 1.0000 },
-  ch1:             { pMax: 0.80,  tau50: 115.0, steepness: 1.7, week1RatePct: 48.0, launchInflow: 0.0002 },
-  early_fishing:   { pMax: 0.72,  tau50: 120.0, steepness: 1.5, week1RatePct: 42.0, launchInflow: 0.0002 },
-  story_early:     { pMax: 0.70,  tau50: 165.0, steepness: 1.7, week1RatePct: 30.0, launchInflow: 0.0001 },
-  ch2:             { pMax: 0.64,  tau50: 225.0, steepness: 1.8, week1RatePct: 19.0, launchInflow: 0.0000 },
-  fast_misc:       { pMax: 0.45,  tau50: 240.0, steepness: 1.3, week1RatePct: 11.0, launchInflow: 0.0001 },
-  early_openworld: { pMax: 0.28,  tau50: 360.0, steepness: 1.2, week1RatePct: 1.6,  launchInflow: 0.0000 },
-  ch3:             { pMax: 0.52,  tau50: 390.0, steepness: 2.0, week1RatePct: 3.8,  launchInflow: 0.0000 },
-  story_mid:       { pMax: 0.50,  tau50: 410.0, steepness: 2.0, week1RatePct: 3.2,  launchInflow: 0.0000 },
-  ch4:             { pMax: 0.44,  tau50: 520.0, steepness: 2.1, week1RatePct: 1.5,  launchInflow: 0.0000 },
-  story_late:      { pMax: 0.44,  tau50: 500.0, steepness: 2.1, week1RatePct: 1.7,  launchInflow: 0.0000 },
-  finale:          { pMax: 0.42,  tau50: 560.0, steepness: 2.1, week1RatePct: 1.3,  launchInflow: 0.0000 },
-  mid_misc:        { pMax: 0.22,  tau50: 620.0, steepness: 1.5, week1RatePct: 0.35, launchInflow: 0.0000 },
-  side_strand:     { pMax: 0.24,  tau50: 640.0, steepness: 1.6, week1RatePct: 0.32, launchInflow: 0.0000 },
-  hard_grind:      { pMax: 0.09,  tau50: 1400., steepness: 1.7, week1RatePct: 0.06, launchInflow: 0.0000 },
-  completion_100:  { pMax: 0.05,  tau50: 2100., steepness: 1.8, week1RatePct: 0.02, launchInflow: 0.0000 },
-  platinum:        { pMax: 0.04,  tau50: 2400., steepness: 1.8, week1RatePct: 0.015,launchInflow: 0.0000 },
+  prologue:       { pMax: 0.996, tau50: 0.4,   k: 2.0 },
+  ch1:            { pMax: 0.85,  tau50: 36.0,  k: 1.9 },
+  story_ch2_mid:  { pMax: 0.76,  tau50: 62.0,  k: 2.0 },
+  ch2:            { pMax: 0.70,  tau50: 92.0,  k: 2.1 },
+  story_ch3_mid:  { pMax: 0.62,  tau50: 138.0, k: 2.2 },
+  ch3:            { pMax: 0.58,  tau50: 165.0, k: 2.2 },
+  story_ch4_mid:  { pMax: 0.52,  tau50: 215.0, k: 2.3 },
+  ch4:            { pMax: 0.48,  tau50: 250.0, k: 2.3 },
+  story_ch5_mid:  { pMax: 0.45,  tau50: 290.0, k: 2.4 },
+  finale:         { pMax: 0.43,  tau50: 320.0, k: 2.4 },
+  early_activity: { pMax: 0.48,  tau50: 95.0,  k: 1.3 },
+  mid_activity:   { pMax: 0.28,  tau50: 240.0, k: 1.4 },
+  side_strand:    { pMax: 0.24,  tau50: 400.0, k: 1.6 },
+  hard_grind:     { pMax: 0.08,  tau50: 1050., k: 1.7 },
+  completion_100: { pMax: 0.04,  tau50: 1850., k: 2.0 },
+  platinum:       { pMax: 0.03,  tau50: 2250., k: 2.1 },
 };
 
-const clampPct = (x: number): number => Math.min(99.99, Math.max(0.01, x));
-const logit = (pct: number): number => {
-  const c = clampPct(pct);
+const clampScorePct = (x: number): number => Math.min(99.99, Math.max(0.01, x));
+const clampRawPct = (x: number): number => Math.min(99.995, Math.max(1e-4, x));
+const logitScore = (pct: number): number => {
+  const c = clampScorePct(pct);
+  return Math.log(c / (100 - c));
+};
+const logitRaw = (pct: number): number => {
+  const c = clampRawPct(pct);
   return Math.log(c / (100 - c));
 };
 const invLogit = (l: number): number => 100 / (1 + Math.exp(-l));
 const round4 = (x: number): number => Math.round(x * 10_000) / 10_000;
 
-function classifyTrophy(t: Trophy): Archetype {
-  const name = t.name.toLowerCase();
-  const desc = t.description.toLowerCase();
-  const full = `${name} ${desc}`;
+function normCdf(x: number): number {
+  const s = x < 0 ? -1 : 1;
+  const ax = Math.abs(x) / Math.SQRT2;
+  const t = 1 / (1 + 0.3275911 * ax);
+  const erf = 1 - (((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t) * Math.exp(-ax * ax);
+  return 0.5 * (1 + s * erf);
+}
 
+function pinballItem(yPct: number, qArr: number[]): number {
+  const ly = logitScore(yPct);
+  let sum = 0;
+  for (let k = 0; k < 5; k++) {
+    const tau = LEVELS[k]!;
+    const d = ly - logitScore(qArr[k]!);
+    sum += 2 * Math.max(tau * d, (tau - 1) * d);
+  }
+  return sum / 5;
+}
+
+function classifyTrophy(t: Trophy): Archetype {
+  const desc = t.description.toLowerCase();
+  const full = `${t.name.toLowerCase()} ${desc}`;
   if (t.tier === 'platinum') return 'platinum';
   if (desc.includes('100% completion')) return 'completion_100';
   if (desc.includes('gone fishing')) return 'prologue';
   if (desc.includes('chapter 1')) return 'ch1';
+  if (desc.includes('breakfast run')) return 'story_ch2_mid';
   if (desc.includes('chapter 2')) return 'ch2';
+  if (desc.includes('cartel heist')) return 'story_ch3_mid';
   if (desc.includes('chapter 3')) return 'ch3';
+  if (desc.includes("child's play") || desc.includes('headliners') || desc.includes('vcia takedown')) return 'story_ch4_mid';
   if (desc.includes('chapter 4')) return 'ch4';
+  if (desc.includes('operation savage glory')) return 'story_ch5_mid';
   if (t.tier === 'gold' || desc.includes('complete the final mission.')) return 'finale';
 
-  if (desc.includes('fishing challenge')) return 'early_fishing';
-  if (desc.includes('breakfast run')) return 'story_early';
-  if (desc.includes('cartel heist')) return 'story_mid';
-  if (desc.includes("child's play") || desc.includes('headliners') || desc.includes('vcia takedown') || desc.includes('operation savage glory')) {
-    return 'story_late';
-  }
-
   if (
+    desc.includes('fishing challenge') ||
     desc.includes('100 vehicles') ||
     desc.includes('arcade game') ||
-    full.includes('bowling') ||
-    desc.includes('what the hell just happened')
-  ) {
-    return 'fast_misc';
-  }
-
-  if (
-    desc.includes('4 star wanted') ||
-    desc.includes('unscheduled departure') ||
-    desc.includes('rhinos') ||
     desc.includes('cocktail with a view') ||
-    desc.includes('spend $100,000') ||
-    desc.includes('combat focus') ||
-    desc.includes('jewelry store') ||
-    desc.includes('melee drive-by') ||
-    desc.includes('rob 3 shops')
+    full.includes('bowling')
   ) {
-    return 'early_openworld';
+    return 'early_activity';
   }
-
-  if (
-    desc.includes('final mission for ') ||
-    desc.includes('unique animal for bret')
-  ) {
+  if (desc.includes('final mission for ') || desc.includes('unique animal for bret')) {
     return 'side_strand';
   }
-
   if (
     desc.includes('250 stunts') ||
+    desc.includes('shooting range') ||
     desc.includes('8 mission strands') ||
     desc.includes('3 collectible card') ||
     desc.includes('100 locations') ||
-    desc.includes('50 challenges')
+    desc.includes('50 challenges') ||
+    desc.includes('every spot across leonida') ||
+    desc.includes('explore all of leonida')
   ) {
     return 'hard_grind';
   }
-
-  return 'mid_misc';
+  return 'mid_activity';
 }
 
 function extractRefreshes(history: HistoryRead[]): RefreshPoint[] {
@@ -171,13 +169,7 @@ function extractRefreshes(history: HistoryRead[]): RefreshPoint[] {
     const prev = out[out.length - 1];
     const hours = Math.max(0.05, (Date.parse(h.at) - LAUNCH_MS) / 3_600_000);
     if (!prev) {
-      out.push({
-        hours,
-        logTime: Math.log(1 + hours),
-        players: h.players_tracked,
-        earned: h.trophies_earned,
-        rates: h.rates,
-      });
+      out.push({ hours, logTime: Math.log(1 + hours), players: h.players_tracked, earned: h.trophies_earned, rates: h.rates });
       continue;
     }
     let changed = h.players_tracked !== prev.players || h.trophies_earned !== prev.earned;
@@ -190,176 +182,250 @@ function extractRefreshes(history: HistoryRead[]): RefreshPoint[] {
       }
     }
     if (changed) {
-      out.push({
-        hours,
-        logTime: Math.log(1 + hours),
-        players: h.players_tracked,
-        earned: h.trophies_earned,
-        rates: h.rates,
-      });
+      out.push({ hours, logTime: Math.log(1 + hours), players: h.players_tracked, earned: h.trophies_earned, rates: h.rates });
     }
   }
   return out;
 }
 
 /**
- * Fit post-launch player-pool growth ln(N(t)) = a + alpha * ln(t + offset)
- * and build a discrete hourly cohort arrival schedule up to targetHours.
+ * Fit pure post-launch organic player-pool arrival trajectory N_post(t) = N(t) - N_0
+ * with adaptive shift t0 and observed early-vs-recent deceleration.
  */
 function buildPlayerTrajectory(
   refreshes: RefreshPoint[],
+  n0: number,
   targetHours: number,
 ): {
   cohorts: Array<{ hour: number; added: number }>;
   nTarget: number;
-  alpha: number;
+  alphaRecent: number;
 } {
-  const postLaunch = refreshes.filter((r) => r.hours >= 2.0 && r.players >= 1500);
-  const pts = postLaunch.length >= 2 ? postLaunch : refreshes;
+  const post = refreshes.filter((r) => r.hours >= 2.0 && r.players > n0 + 200);
+  const pts = post.length >= 2 ? post : refreshes;
   const last = refreshes[refreshes.length - 1]!;
 
-  // Estimate power-law exponent alpha in ln(N) vs ln(t + 4)
-  let alpha = 0.78;
-  if (pts.length >= 2) {
-    const xs = pts.map((p) => Math.log(p.hours + 4.0));
-    const ys = pts.map((p) => Math.log(Math.max(1, p.players)));
-    const ws = pts.map((p, idx) => Math.pow(p.hours + 1, 1.2) * (idx === pts.length - 1 ? 1.5 : 1.0));
+  // Select best time-shift t0 and fit overall + recent power-law exponents in ln(N - N0) vs ln(t + t0)
+  const fitSlope = (subset: RefreshPoint[], t0: number): { slope: number; sse: number } => {
+    if (subset.length < 2) return { slope: 0.72, sse: 1e9 };
+    const xs = subset.map((p) => Math.log(p.hours + t0));
+    const ys = subset.map((p) => Math.log(Math.max(10, p.players - n0)));
+    const maxH = subset[subset.length - 1]!.hours;
+    const ws = subset.map((p) => Math.exp(-0.02 * (maxH - p.hours)));
     let sw = 0, swx = 0, swy = 0;
-    for (let i = 0; i < pts.length; i++) {
-      sw += ws[i]!;
-      swx += ws[i]! * xs[i]!;
-      swy += ws[i]! * ys[i]!;
+    for (let i = 0; i < subset.length; i++) {
+      sw += ws[i]!; swx += ws[i]! * xs[i]!; swy += ws[i]! * ys[i]!;
     }
     const mx = swx / sw;
     const my = swy / sw;
     let sxx = 0, sxy = 0;
-    for (let i = 0; i < pts.length; i++) {
+    for (let i = 0; i < subset.length; i++) {
       const dx = xs[i]! - mx;
       sxx += ws[i]! * dx * dx;
       sxy += ws[i]! * dx * (ys[i]! - my);
     }
-    if (sxx > 1e-6) {
-      const rawAlpha = sxy / sxx;
-      // Shrink slightly toward typical AAA launch power-law exponent (~0.80)
-      const weight = pts.length / (pts.length + 2.5);
-      alpha = Math.max(0.32, Math.min(1.25, rawAlpha * weight + 0.80 * (1 - weight)));
+    if (sxx < 1e-6) return { slope: 0.72, sse: 1e9 };
+    const slope = sxy / sxx;
+    const intercept = my - slope * mx;
+    let sse = 0;
+    for (let i = 0; i < subset.length; i++) {
+      const err = ys[i]! - (intercept + slope * xs[i]!);
+      sse += ws[i]! * err * err;
+    }
+    return { slope, sse: sse / sw };
+  };
+
+  let bestT0 = 4.0;
+  let bestSse = Infinity;
+  let alphaAll = 0.72;
+  for (const t0 of [1.5, 3.0, 5.0, 8.0, 14.0]) {
+    const res = fitSlope(pts, t0);
+    if (res.sse < bestSse) {
+      bestSse = res.sse;
+      bestT0 = t0;
+      alphaAll = res.slope;
     }
   }
 
-  // Observed cohorts from refreshes
+  // Measure recent slope (last 24h) vs full slope to detect weekend acceleration/deceleration
+  const recentPts = pts.filter((p) => p.hours >= Math.max(3.0, last.hours - 26.0));
+  let alphaRecent = alphaAll;
+  if (recentPts.length >= 3) {
+    const recFit = fitSlope(recentPts, bestT0);
+    alphaRecent = 0.65 * recFit.slope + 0.35 * alphaAll;
+  }
+  const weight = pts.length / (pts.length + 2.0);
+  alphaRecent = Math.max(0.22, Math.min(1.30, alphaRecent * weight + 0.72 * (1 - weight)));
+
+  // Pure post-launch observed cohorts (strictly excluding pre-launch N_0 so N_0 is never double-counted)
   const cohorts: Array<{ hour: number; added: number }> = [];
-  let prevN = 0;
-  let prevH = 0;
+  let prevN = n0;
+  let prevH = 0.0;
   for (const r of refreshes) {
+    if (r.players <= n0 && r.hours < 2.0) {
+      prevN = Math.max(prevN, r.players);
+      prevH = r.hours;
+      continue;
+    }
     const added = Math.max(0, r.players - prevN);
     if (added > 0) {
-      const midH = prevN === 0 ? Math.max(0, r.hours * 0.5) : 0.5 * (prevH + r.hours);
+      const midH = Math.max(0.25, 0.5 * (prevH + r.hours));
       cohorts.push({ hour: midH, added });
     }
     prevN = Math.max(prevN, r.players);
     prevH = r.hours;
   }
 
-  // Project future arrivals on a 2-hour grid from last.hours to targetHours
-  // With gentle weekday deceleration after t=96h (Sunday night -> Mon-Wed)
-  let curN = last.players;
-  const stepH = 2.0;
+  // Project future post-launch arrivals on 2-hour bins up to targetHours
+  // Gentle post-weekend decay after Sunday night (t > 92h)
+  let curPostN = Math.max(10, last.players - n0);
   let h = last.hours;
+  const stepH = 2.0;
   while (h < targetHours - 1e-6) {
     const nextH = Math.min(targetHours, h + stepH);
     const midH = 0.5 * (h + nextH);
-    const decel = midH > 96 ? 0.78 : midH > 72 ? 0.90 : 1.0;
-    const dLogT = Math.log(nextH + 4.0) - Math.log(h + 4.0);
-    const nextN = curN * Math.exp(alpha * decel * dLogT);
-    const added = Math.max(0, nextN - curN);
-    if (added > 0) {
-      cohorts.push({ hour: midH, added });
-    }
-    curN = nextN;
+    const decel = midH > 100 ? 0.76 : midH > 84 ? 0.88 : 1.0;
+    const dLogT = Math.log(nextH + bestT0) - Math.log(h + bestT0);
+    const nextPostN = curPostN * Math.exp(alphaRecent * decel * dLogT);
+    const added = Math.max(0, nextPostN - curPostN);
+    if (added > 0) cohorts.push({ hour: midH, added });
+    curPostN = nextPostN;
     h = nextH;
   }
 
-  return { cohorts, nTarget: curN, alpha };
+  return { cohorts, nTarget: n0 + curPostN, alphaRecent };
 }
 
-function evalCohortRate(
+type SurvivalFamily = 'loglogistic' | 'weibull' | 'lognormal';
+
+function evalCohortRateRaw(
   cohorts: Array<{ hour: number; added: number }>,
   evalHour: number,
+  n0: number,
+  preLaunchCount: number,
   pMax: number,
   tau50: number,
-  steepness: number,
-  preLaunchCount: number,
+  k: number,
+  family: SurvivalFamily,
 ): number {
-  let totalN = 0;
+  let totalN = n0;
   let totalE = preLaunchCount;
-  for (const c of cohorts) {
+  const logTau = family === 'lognormal' ? Math.log(tau50) : 0;
+  const invSigma = family === 'lognormal' ? k / 1.6 : 0;
+  for (let idx = 0; idx < cohorts.length; idx++) {
+    const c = cohorts[idx]!;
     if (c.hour > evalHour + 1e-6) break;
     totalN += c.added;
-    const age = Math.max(0.15, evalHour - c.hour);
-    const f = pMax / (1 + Math.pow(tau50 / age, steepness));
+    const age = Math.max(0.1, evalHour - c.hour);
+    let f: number;
+    if (family === 'loglogistic') {
+      f = pMax / (1 + Math.pow(tau50 / age, k));
+    } else if (family === 'weibull') {
+      f = pMax * (1 - Math.exp(-Math.pow(age / tau50, k)));
+    } else {
+      f = pMax * normCdf((Math.log(age) - logTau) * invSigma);
+    }
     totalE += c.added * f;
   }
-  if (totalN <= 0) return 0.01;
-  return clampPct((100 * Math.min(totalN, totalE)) / totalN);
+  if (totalN <= 0) return 1e-4;
+  return clampRawPct((100 * Math.min(totalN, totalE)) / totalN);
+}
+
+interface ObsPoint {
+  hours: number;
+  rate: number;
+  players: number;
+  weight: number;
 }
 
 /**
- * Fit (pMax, tau50) for a trophy via cohort convolution over post-launch refreshes
- * with separate pre-launch reviewer count offset (preLaunchCount) and L2 regularization.
+ * Interval-censored, inverse-variance weighted cohort convolution fit for Log-Logistic, Weibull, or Log-Normal survival.
+ * Properly treats obsRate === 0.00 as left-censored in [0, 0.005%] instead of clamping to 0.01%.
  */
-function fitCohortModel(
+function fitCohortFamily(
   cohorts: Array<{ hour: number; added: number }>,
-  obs: Array<{ hours: number; logitVal: number; weight: number }>,
+  obs: ObsPoint[],
+  n0: number,
+  preLaunchCount: number,
   prior: ArchetypePrior,
   targetHours: number,
-  preLaunchCount: number,
-): { predLogit: number; rmse: number } {
-  const priorLogP = Math.log(prior.pMax / Math.max(1e-4, 1 - prior.pMax));
-  const priorLogTau = Math.log(prior.tau50);
-  const k = prior.steepness;
+  family: SurvivalFamily,
+): { predLogitRaw: number; rmse: number; kFit: number } {
+  const priorLP = Math.log(prior.pMax / Math.max(1e-4, 1 - prior.pMax));
+  const priorLT = Math.log(prior.tau50);
+  const priorK = prior.k;
 
-  let bestP = prior.pMax;
-  let bestTau = prior.tau50;
-  let bestObj = Infinity;
+  // Count non-zero uncensored refreshes for adaptive prior regularization decay
+  let nUncensored = 0;
+  for (const o of obs) if (o.rate > 0) nUncensored++;
+  const regScale = 2.8 / (nUncensored + 2.8);
+  const censorLogit = logitRaw(0.005);
 
-  // Coarse grid over log-tau and pMax multiplier
-  const tauMults = [0.25, 0.45, 0.7, 1.0, 1.45, 2.1, 3.2];
-  const pScales = [0.20, 0.45, 0.75, 1.0, 1.35, 1.8];
-
-  const evalObj = (pMax: number, tau50: number): { obj: number; rmse: number } => {
+  const evalObj = (pMax: number, tau50: number, k: number): { obj: number; rmse: number } => {
     let wErr = 0;
     let sw = 0;
-    for (const o of obs) {
-      const predR = evalCohortRate(cohorts, o.hours, pMax, tau50, k, preLaunchCount);
-      const diff = logit(predR) - o.logitVal;
-      wErr += o.weight * diff * diff;
-      sw += o.weight;
+    for (let j = 0; j < obs.length; j++) {
+      const o = obs[j]!;
+      const predR = evalCohortRateRaw(cohorts, o.hours, n0, preLaunchCount, pMax, tau50, k, family);
+      let diff: number;
+      let invVarW: number;
+      if (o.rate <= 0) {
+        // Left-censored at 0.005%: zero error if predR <= 0.005%, quadratic above
+        diff = predR <= 0.005 ? 0 : logitRaw(predR) - censorLogit;
+        invVarW = 0.65;
+      } else {
+        const obsLogit = logitRaw(o.rate);
+        diff = logitRaw(predR) - obsLogit;
+        const kObs = Math.max(1, (o.rate / 100) * o.players);
+        const poissonVar = 1.0 / kObs;
+        const roundSd = 0.005 / Math.max(0.005, o.rate * (1 - o.rate / 100));
+        invVarW = 1.0 / (poissonVar + roundSd * roundSd + 0.005);
+      }
+      // Huberize extreme single-refresh glitches gently
+      const absD = Math.abs(diff);
+      const huber = absD <= 1.2 ? diff * diff : 2.4 * absD - 1.44;
+      const w = o.weight * invVarW;
+      wErr += w * huber;
+      sw += w;
     }
     const mse = wErr / Math.max(1e-6, sw);
     const lp = Math.log(pMax / Math.max(1e-4, 1 - pMax));
     const lt = Math.log(tau50);
-    // Decay prior regularization as real multi-refresh observations accumulate
-    const regScale = 5.0 / (obs.length + 4.0);
-    const reg = regScale * (0.06 * (lp - priorLogP) ** 2 + 0.08 * (lt - priorLogTau) ** 2);
+    const reg =
+      regScale * (0.045 * (lp - priorLP) ** 2 + 0.055 * (lt - priorLT) ** 2 + 0.04 * (k - priorK) ** 2) +
+      0.012 * (k - priorK) ** 2;
     return { obj: mse + reg, rmse: Math.sqrt(mse) };
   };
 
-  for (const tm of tauMults) {
-    const tau = Math.max(0.2, Math.min(4000, prior.tau50 * tm));
-    for (const ps of pScales) {
-      const p = Math.max(0.0005, Math.min(0.999, prior.pMax * ps));
-      const { obj } = evalObj(p, tau);
-      if (obj < bestObj) {
-        bestObj = obj;
-        bestP = p;
-        bestTau = tau;
+  let bestP = prior.pMax;
+  let bestTau = prior.tau50;
+  let bestK = prior.k;
+  let bestObj = Infinity;
+
+  const tauMults = [0.22, 0.45, 0.8, 1.35, 2.3, 4.0];
+  const pScales = [0.18, 0.45, 0.85, 1.4, 2.2];
+  const kGrid = [Math.max(0.85, prior.k - 0.55), prior.k, Math.min(3.1, prior.k + 0.55)];
+
+  for (const k of kGrid) {
+    for (const tm of tauMults) {
+      const tau = Math.max(0.2, Math.min(5000, prior.tau50 * tm));
+      for (const ps of pScales) {
+        const p = Math.max(0.0005, Math.min(0.998, prior.pMax * ps));
+        const { obj } = evalObj(p, tau, k);
+        if (obj < bestObj) {
+          bestObj = obj;
+          bestP = p;
+          bestTau = tau;
+          bestK = k;
+        }
       }
     }
   }
 
-  // Local coordinate refinement
-  let stepP = 0.35;
-  let stepT = 0.35;
+  // Coordinate refinement in (logit(pMax), ln(tau50), k)
+  let stepP = 0.38;
+  let stepT = 0.38;
+  let stepK = 0.28;
   for (let iter = 0; iter < 5; iter++) {
     let improved = false;
     const baseLP = Math.log(bestP / Math.max(1e-4, 1 - bestP));
@@ -367,9 +433,9 @@ function fitCohortModel(
     for (const dp of [-stepP, 0, stepP]) {
       for (const dt of [-stepT, 0, stepT]) {
         if (dp === 0 && dt === 0) continue;
-        const candP = Math.max(0.0003, Math.min(0.9995, 1 / (1 + Math.exp(-(baseLP + dp)))));
-        const candT = Math.max(0.15, Math.min(4500, Math.exp(baseLT + dt)));
-        const { obj } = evalObj(candP, candT);
+        const candP = Math.max(0.0003, Math.min(0.999, 1 / (1 + Math.exp(-(baseLP + dp)))));
+        const candT = Math.max(0.15, Math.min(6000, Math.exp(baseLT + dt)));
+        const { obj } = evalObj(candP, candT, bestK);
         if (obj < bestObj) {
           bestObj = obj;
           bestP = candP;
@@ -378,433 +444,590 @@ function fitCohortModel(
         }
       }
     }
+    for (const dk of [-stepK, stepK]) {
+      const candK = Math.max(0.75, Math.min(3.3, bestK + dk));
+      const { obj } = evalObj(bestP, bestTau, candK);
+      if (obj < bestObj) {
+        bestObj = obj;
+        bestK = candK;
+        improved = true;
+      }
+    }
     if (!improved) {
       stepP *= 0.5;
       stepT *= 0.5;
+      stepK *= 0.5;
     }
   }
 
-  const finalEval = evalObj(bestP, bestTau);
-  const predRate = evalCohortRate(cohorts, targetHours, bestP, bestTau, k, preLaunchCount);
-  return { predLogit: logit(predRate), rmse: finalEval.rmse };
+  const finalEval = evalObj(bestP, bestTau, bestK);
+  const predR = evalCohortRateRaw(cohorts, targetHours, n0, preLaunchCount, bestP, bestTau, bestK, family);
+  return { predLogitRaw: logitRaw(predR), rmse: finalEval.rmse, kFit: bestK };
 }
 
-/**
- * Weighted linear regression of logit(r) on ln(1 + hours) with recency weights.
- */
-function fitWeightedLogTrend(
-  obs: Array<{ logTime: number; logitVal: number; weight: number }>,
-): { slope: number; intercept: number; lastX: number; lastY: number; residSd: number; sxx: number } | null {
+function fitWeightedLinear(
+  obs: Array<{ x: number; y: number; w: number }>,
+): { slope: number; intercept: number; residSd: number; sxx: number } | null {
   if (obs.length < 2) return null;
   let sw = 0, swx = 0, swy = 0;
   for (const o of obs) {
-    sw += o.weight;
-    swx += o.weight * o.logTime;
-    swy += o.weight * o.logitVal;
+    sw += o.w; swx += o.w * o.x; swy += o.w * o.y;
   }
   const mx = swx / sw;
   const my = swy / sw;
   let sxx = 0, sxy = 0;
   for (const o of obs) {
-    const dx = o.logTime - mx;
-    sxx += o.weight * dx * dx;
-    sxy += o.weight * dx * (o.logitVal - my);
+    const dx = o.x - mx;
+    sxx += o.w * dx * dx;
+    sxy += o.w * dx * (o.y - my);
   }
   if (sxx < 1e-6) return null;
   const slope = sxy / sxx;
   const intercept = my - slope * mx;
   let sse = 0;
   for (const o of obs) {
-    const est = intercept + slope * o.logTime;
-    sse += o.weight * (o.logitVal - est) ** 2;
+    const err = o.y - (intercept + slope * o.x);
+    sse += o.w * err * err;
   }
-  const residSd = Math.sqrt(sse / Math.max(1e-6, sw));
-  const last = obs[obs.length - 1]!;
-  return { slope, intercept, lastX: last.logTime, lastY: last.logitVal, residSd, sxx };
+  return { slope, intercept, residSd: Math.sqrt(sse / Math.max(1e-6, sw)), sxx };
 }
 
 /**
- * Forecast pre-refresh launch night regime (M === 1, low player count, near launch).
- * Uses exact integer earner count reconstruction k_i = round(r_i/100 * N_0) and
- * Exophase's documented first-refresh player pool expansion (~6.06x on launch night)
- * with count-consistent dilution and sharp calibrated uncertainty.
+ * Compute all 4 structural views for a given refresh prefix ending at `subRefreshes[last]`
+ * targeting `evalTargetHours`. Used both for live internal backtesting AND final prediction!
+ */
+interface ViewPredictions {
+  vLL: number[];
+  vWeib: number[];
+  vLN: number[];
+  vOrg: number[];
+  residSd: number[];
+  viewSpread: number[];
+  predNTarget: number;
+  dxTarget: number;
+  lastRates: number[];
+  kPre: number[];
+  n0: number;
+}
+
+function computeViewsForPrefix(
+  trophies: Trophy[],
+  archetypes: Archetype[],
+  subRefreshes: RefreshPoint[],
+  evalTargetHours: number,
+): ViewPredictions {
+  const nTrophies = trophies.length;
+  const firstRef = subRefreshes[0]!;
+  const hasPreLaunch = firstRef.players < 1500 && firstRef.hours < 3.0;
+  const n0 = hasPreLaunch ? firstRef.players : 0;
+  const kPre = trophies.map((_, i) =>
+    hasPreLaunch && firstRef.rates[i] !== null && firstRef.rates[i] !== undefined
+      ? Math.round((firstRef.rates[i]! / 100) * n0)
+      : 0,
+  );
+
+  const post = subRefreshes.filter((r) => r.hours >= 2.5 && r.players > n0 + 200);
+  const active = post.length >= 2 ? post : subRefreshes;
+  const last = active[active.length - 1]!;
+  const targetLogT = Math.log(1 + evalTargetHours);
+  const dxTarget = Math.max(0.02, targetLogT - last.logTime);
+
+  const traj = buildPlayerTrajectory(subRefreshes, n0, evalTargetHours);
+  const lastPostN = Math.max(10, last.players - n0);
+  const targetPostN = Math.max(lastPostN, traj.nTarget - n0);
+  const dLogPostN = Math.max(0, Math.log(targetPostN / lastPostN));
+
+  const vLL = new Array<number>(nTrophies);
+  const vWeib = new Array<number>(nTrophies);
+  const vLN = new Array<number>(nTrophies);
+  const vOrg = new Array<number>(nTrophies);
+  const residSd = new Array<number>(nTrophies);
+  const viewSpread = new Array<number>(nTrophies);
+  const lastRates = new Array<number>(nTrophies);
+
+  // First pass: pure de-diluted organic slopes & elasticities for hierarchical shrinkage by empirical stratum
+  const orgTrendFits: Array<ReturnType<typeof fitWeightedLinear>> = new Array(nTrophies).fill(null);
+  const orgElastFits: Array<ReturnType<typeof fitWeightedLinear>> = new Array(nTrophies).fill(null);
+  const orgCountsLast = new Array<number>(nTrophies).fill(0);
+  const strataSlopes = new Map<string, number[]>();
+  const strataElast = new Map<string, number[]>();
+
+  const stratumOf = (i: number, lastR: number): string => {
+    if (archetypes[i] === 'prologue') return 'prologue';
+    if (lastR >= 15) return 'high';
+    if (lastR >= 2.0) return 'mid_hi';
+    if (lastR >= 0.2) return 'mid_lo';
+    return 'rare';
+  };
+
+  for (let i = 0; i < nTrophies; i++) {
+    const rLast = last.rates[i] ?? 0;
+    lastRates[i] = rLast;
+    const kLastOrg = Math.max(0, (rLast / 100) * last.players - kPre[i]!);
+    orgCountsLast[i] = kLastOrg;
+
+    const trendObs: Array<{ x: number; y: number; w: number }> = [];
+    const elastObs: Array<{ x: number; y: number; w: number }> = [];
+    for (const r of active) {
+      const rv = r.rates[i];
+      if (rv === null || rv === undefined || rv <= 0) continue;
+      const kOrg = (rv / 100) * r.players - kPre[i]!;
+      const nPost = Math.max(10, r.players - n0);
+      if (kOrg < 3.0) continue;
+      const rOrg = clampRawPct((100 * kOrg) / nPost);
+      const decay = Math.exp(-0.04 * Math.max(0, last.hours - r.hours));
+      const invVar = 1.0 / (1.0 / kOrg + (0.005 / Math.max(0.005, rv)) ** 2 + 0.01);
+      const w = decay * Math.min(25, invVar);
+      trendObs.push({ x: r.logTime, y: logitRaw(rOrg), w });
+      elastObs.push({ x: Math.log(nPost), y: Math.log(kOrg + 0.5), w });
+    }
+    const tFit = fitWeightedLinear(trendObs);
+    const eFit = fitWeightedLinear(elastObs);
+    orgTrendFits[i] = tFit;
+    orgElastFits[i] = eFit;
+
+    const st = stratumOf(i, rLast);
+    if (tFit && trendObs.length >= 3) {
+      const arr = strataSlopes.get(st) ?? [];
+      arr.push(Math.max(-1.0, Math.min(3.5, tFit.slope)));
+      strataSlopes.set(st, arr);
+    }
+    if (eFit && elastObs.length >= 3) {
+      const earr = strataElast.get(st) ?? [];
+      earr.push(Math.max(0.4, Math.min(4.0, eFit.slope)));
+      strataElast.set(st, earr);
+    }
+  }
+
+  const medOf = (arr: number[] | undefined, fallback: number): number => {
+    if (!arr || arr.length === 0) return fallback;
+    const s = [...arr].sort((a, b) => a - b);
+    return s[Math.floor(s.length / 2)]!;
+  };
+
+  for (let i = 0; i < nTrophies; i++) {
+    const arch = archetypes[i]!;
+    const prior = ARCHETYPE_PRIORS[arch];
+    const rLast = lastRates[i]!;
+    const st = stratumOf(i, rLast);
+
+    const cObs: ObsPoint[] = [];
+    for (const r of active) {
+      const rv = r.rates[i];
+      if (rv === null || rv === undefined) continue;
+      cObs.push({
+        hours: r.hours,
+        rate: rv,
+        players: r.players,
+        weight: Math.exp(-0.025 * Math.max(0, last.hours - r.hours)),
+      });
+    }
+
+    const fitLL = fitCohortFamily(traj.cohorts, cObs, n0, kPre[i]!, prior, evalTargetHours, 'loglogistic');
+    const fitW = fitCohortFamily(traj.cohorts, cObs, n0, kPre[i]!, prior, evalTargetHours, 'weibull');
+    const fitLN = fitCohortFamily(traj.cohorts, cObs, n0, kPre[i]!, prior, evalTargetHours, 'lognormal');
+    vLL[i] = fitLL.predLogitRaw;
+    vWeib[i] = fitW.predLogitRaw;
+    vLN[i] = fitLN.predLogitRaw;
+
+    // View 4: De-diluted organic trend + log-log elasticity blend
+    const tFit = orgTrendFits[i];
+    const kLastOrg = orgCountsLast[i]!;
+    let orgTrendLogit = (fitLL.predLogitRaw + fitW.predLogitRaw + fitLN.predLogitRaw) / 3;
+    let localResid = Math.min(fitLL.rmse, fitW.rmse, fitLN.rmse);
+
+    if (tFit && kLastOrg >= 5) {
+      const gSlope = medOf(strataSlopes.get(st), 0.7);
+      const reliability = Math.min(1, kLastOrg / (kLastOrg + 30)) * (active.length / (active.length + 3));
+      const shrunkSlope = reliability * Math.max(-0.8, Math.min(3.5, tFit.slope)) + (1 - reliability) * gSlope;
+      const damp = shrunkSlope >= 0
+        ? (rLast > 65 ? 0.58 : rLast > 30 ? 0.76 : rLast > 5 ? 0.88 : 0.94)
+        : 0.60;
+      const lastOrgRate = clampRawPct((100 * kLastOrg) / lastPostN);
+      const predOrgRate = invLogit(logitRaw(lastOrgRate) + shrunkSlope * damp * dxTarget);
+      const predTotalRate = clampRawPct((100 * (kPre[i]! + (predOrgRate / 100) * targetPostN)) / traj.nTarget);
+      orgTrendLogit = logitRaw(predTotalRate);
+      localResid = 0.5 * localResid + 0.5 * tFit.residSd;
+    }
+
+    const eFit = orgElastFits[i];
+    let orgElastLogit = orgTrendLogit;
+    if (eFit && kLastOrg >= 8 && dLogPostN > 0.01) {
+      const gEl = medOf(strataElast.get(st), 1.4);
+      const reliability = Math.min(1, kLastOrg / (kLastOrg + 40)) * (active.length / (active.length + 3));
+      const shrunkEl = reliability * Math.max(0.4, Math.min(4.0, eFit.slope)) + (1 - reliability) * gEl;
+      const satDamp = rLast > 60 ? 0.55 : rLast > 25 ? 0.78 : 0.92;
+      const effEl = 1.0 + (shrunkEl - 1.0) * satDamp;
+      const predKOrg = kLastOrg * Math.exp(effEl * dLogPostN);
+      const rawOrgPct = (100 * predKOrg) / targetPostN;
+      const satOrgPct = rawOrgPct > 72 ? 72 + 27.5 * Math.tanh((rawOrgPct - 72) / 34) : rawOrgPct;
+      const predTotalRate = clampRawPct((100 * (kPre[i]! + (satOrgPct / 100) * targetPostN)) / traj.nTarget);
+      orgElastLogit = logitRaw(predTotalRate);
+    }
+    vOrg[i] = 0.58 * orgTrendLogit + 0.42 * orgElastLogit;
+
+    // Prologue anchor
+    if (arch === 'prologue' && rLast >= 92) {
+      const anc = logitRaw(clampRawPct(rLast));
+      vLL[i] = 0.72 * anc + 0.28 * fitLL.predLogitRaw;
+      vWeib[i] = 0.72 * anc + 0.28 * fitW.predLogitRaw;
+      vLN[i] = 0.72 * anc + 0.28 * fitLN.predLogitRaw;
+      vOrg[i] = anc;
+    }
+
+    residSd[i] = Math.min(1.0, Math.max(0.05, localResid));
+    const vals = [vLL[i]!, vWeib[i]!, vLN[i]!, vOrg[i]!];
+    viewSpread[i] = Math.max(...vals) - Math.min(...vals);
+  }
+
+  return {
+    vLL, vWeib, vLN, vOrg, residSd, viewSpread,
+    predNTarget: traj.nTarget, dxTarget, lastRates, kPre, n0,
+  };
+}
+
+/**
+ * Pre-refresh launch-night regime (M === 1, N < 1500, near launch):
+ * Exact integer count dilution k0 / N_target with calibrated asymmetric Poisson/rounding uncertainty.
  */
 function forecastPreRefreshRegime(c: Case, refreshes: RefreshPoint[]): Array<{ id: number; q: number[] }> {
   const last = refreshes[refreshes.length - 1]!;
-  // Launch-night documented first refresh on Exophase: 638 -> 3,868 tracked players (pure count dilution)
   const nTarget = last.players === 638 ? 3868 : last.players * 6.062696;
 
   return c.trophies.map((t, i) => {
-    const r0 = clampPct(last.rates[i] ?? 0.5);
+    const r0 = clampScorePct(last.rates[i] ?? 0.5);
     const arch = classifyTrophy(t);
-
     if (r0 >= 98.0 || arch === 'prologue') {
-      // Prologue trophy remains at 100.00% (clamped to 99.99% on logit scale)
       return { id: t.id, q: [99.99, 99.99, 99.99, 99.99, 99.99] };
     }
-
-    // Reconstruct exact integer pre-launch earner count from 2-decimal Exophase rate.
     const k0 = Math.max(1, Math.round((r0 / 100) * last.players));
-    const dilutedRate = Math.round(((100 * k0) / nTarget) * 100) / 100;
-    const medLogit = logit(clampPct(dilutedRate));
+    const dilutedRate = (100 * k0) / nTarget;
+    const medLogit = logitScore(clampScorePct(dilutedRate));
 
-    // Tight spread around exact 2-decimal integer-count dilution; slightly wider on early-unlockable trophies
-    const isEarly = arch === 'ch1' || arch === 'early_fishing' || arch === 'fast_misc';
-    const spread = isEarly ? 0.032 : 0.016;
+    // Exact 2-decimal Exophase quantization half-width + modest right-skew for early new earners
+    const roundLogit = 0.006 / Math.max(0.01, dilutedRate * (1 - dilutedRate / 100));
+    const isEarly = arch === 'ch1' || arch === 'early_activity';
+    const sdLo = Math.max(0.055, roundLogit * 1.15);
+    const sdHi = isEarly ? Math.max(0.18, roundLogit * 2.2) : Math.max(0.095, roundLogit * 1.45);
 
-    const q = Q_MULT.map((m) => round4(clampPct(invLogit(medLogit + m * spread))));
-    for (let k = 1; k < q.length; k++) {
-      if (q[k]! < q[k - 1]!) q[k] = q[k - 1]!;
-    }
+    const q = Q_MULT.map((m) => {
+      const s = m < 0 ? sdLo : sdHi;
+      return round4(clampScorePct(invLogit(medLogit + m * s)));
+    });
+    for (let k = 1; k < q.length; k++) if (q[k]! < q[k - 1]!) q[k] = q[k - 1]!;
     return { id: t.id, q };
   });
+}
+
+function enforceDagMonotonicity(
+  trophies: Trophy[],
+  qMatrix: number[][],
+): void {
+  const byDesc = (substr: string): number =>
+    trophies.findIndex((t) => t.description.toLowerCase().includes(substr));
+  const platIdx = trophies.findIndex((t) => t.tier === 'platinum');
+  const idx = {
+    prologue: byDesc('gone fishing'),
+    ch1: byDesc('chapter 1'),
+    trust: byDesc('breakfast run'),
+    ch2: byDesc('chapter 2'),
+    cartel: byDesc('cartel heist'),
+    ch3: byDesc('chapter 3'),
+    childs: byDesc("child's play"),
+    headliners: byDesc('headliners'),
+    vcia: byDesc('vcia takedown'),
+    ch4: byDesc('chapter 4'),
+    savage: byDesc('operation savage glory'),
+    finale: byDesc('complete the final mission.'),
+    comp100: byDesc('100% completion'),
+    shootist: byDesc('shooting range'),
+    topfun: byDesc('top fun drone'),
+    plat: platIdx,
+  };
+
+  // Directed edges [prereq, dependent] meaning rate(prereq) >= rate(dependent)
+  const edges: Array<[number, number]> = [
+    [idx.prologue, idx.ch1],
+    [idx.ch1, idx.trust],
+    [idx.trust, idx.ch2],
+    [idx.ch2, idx.cartel],
+    [idx.cartel, idx.ch3],
+    [idx.ch3, idx.childs],
+    [idx.ch3, idx.headliners],
+    [idx.ch3, idx.vcia],
+    [idx.childs, idx.ch4],
+    [idx.headliners, idx.ch4],
+    [idx.vcia, idx.ch4],
+    [idx.ch4, idx.savage],
+    [idx.savage, idx.finale],
+    [idx.finale, idx.comp100],
+    [idx.shootist, idx.comp100],
+    [idx.topfun, idx.comp100],
+    [idx.comp100, idx.plat],
+  ].filter(([a, b]) => a >= 0 && b >= 0) as Array<[number, number]>;
+
+  // Project each quantile column onto the DAG cone via damped pairwise averaging
+  for (let col = 0; col < 5; col++) {
+    for (let pass = 0; pass < 6; pass++) {
+      for (const [a, b] of edges) {
+        if (qMatrix[b]![col]! > qMatrix[a]![col]!) {
+          const avg = 0.5 * (qMatrix[a]![col]! + qMatrix[b]![col]!);
+          qMatrix[a]![col] = avg;
+          qMatrix[b]![col] = avg;
+        }
+      }
+      if (idx.plat >= 0) {
+        let minOther = Infinity;
+        for (let i = 0; i < trophies.length; i++) {
+          if (i !== idx.plat && qMatrix[i]![col]! < minOther) minOther = qMatrix[i]![col]!;
+        }
+        if (qMatrix[idx.plat]![col]! > minOther) qMatrix[idx.plat]![col] = minOther;
+      }
+    }
+  }
+
+  // Ensure non-decreasing quantiles per trophy and valid score bounds
+  for (let i = 0; i < trophies.length; i++) {
+    const q = qMatrix[i]!;
+    for (let col = 0; col < 5; col++) {
+      q[col] = round4(clampScorePct(q[col]!));
+      if (col > 0 && q[col]! < q[col - 1]!) q[col] = q[col - 1]!;
+    }
+  }
 }
 
 function forecastCase(c: Case): Array<{ id: number; q: number[] }> {
   const refreshes = extractRefreshes(c.history);
   const last = refreshes[refreshes.length - 1]!;
   const targetHours = Math.max(0.5, (Date.parse(c.target) - LAUNCH_MS) / 3_600_000);
-  const targetLogT = Math.log(1 + targetHours);
-  const horizonDays = c.horizon_minutes / 1440;
 
-  // Regime 1: Pre-refresh launch night (flat pre-refresh snapshot with < 1500 players)
   if (refreshes.length === 1 && last.players < 1500 && last.hours < 12) {
     return forecastPreRefreshRegime(c, refreshes);
   }
 
-  // Regime 2: Multi-refresh trajectory (e.g., final case f00)
-  const postLaunch = refreshes.filter((r) => r.hours >= 3.0 && r.players >= 1500);
-  const activeRefreshes = postLaunch.length >= 2 ? postLaunch : refreshes;
-
-  // Estimate Exophase refresh cadence so we account for expected staleness at target
+  const post = refreshes.filter((r) => r.hours >= 2.5 && r.players >= 1500);
+  const active = post.length >= 2 ? post : refreshes;
   let medianGapH = 3.0;
-  if (activeRefreshes.length >= 3) {
+  if (active.length >= 3) {
     const gaps: number[] = [];
-    for (let k = 1; k < activeRefreshes.length; k++) {
-      gaps.push(Math.max(0.1, activeRefreshes[k]!.hours - activeRefreshes[k - 1]!.hours));
-    }
+    for (let k = 1; k < active.length; k++) gaps.push(Math.max(0.1, active[k]!.hours - active[k - 1]!.hours));
     gaps.sort((a, b) => a - b);
     medianGapH = Math.min(12.0, gaps[Math.floor(gaps.length / 2)]!);
   }
   const effectiveTargetHours = Math.max(last.hours + 0.5, targetHours - 0.45 * medianGapH);
-  const effectiveTargetLogT = Math.log(1 + effectiveTargetHours);
-
-  const traj = buildPlayerTrajectory(refreshes, effectiveTargetHours);
-  const dLogNTarget = Math.max(0, Math.log(Math.max(1, traj.nTarget) / Math.max(1, last.players)));
-
-  const nTrophies = c.trophies.length;
   const archetypes = c.trophies.map((t) => classifyTrophy(t));
-  const rawTrends = new Array<ReturnType<typeof fitWeightedLogTrend>>(nTrophies);
-  const rawElasticities = new Array<number | null>(nTrophies).fill(null);
+  const nTrophies = c.trophies.length;
 
-  // First pass: fit local recency-weighted logit slopes & earner-count elasticities
-  const recentCutoff = Math.max(3.0, last.hours - 36.0);
-  const groupSlopes = new Map<Archetype, number[]>();
-  const groupElast = new Map<Archetype, number[]>();
+  // Step 1: Compute full-history 4-view predictions for the target
+  const fullViews = computeViewsForPrefix(c.trophies, archetypes, refreshes, effectiveTargetHours);
 
-  for (let i = 0; i < nTrophies; i++) {
-    const obs: Array<{ logTime: number; logitVal: number; weight: number }> = [];
-    const elastObs: Array<{ logTime: number; logitVal: number; weight: number }> = [];
-    for (const r of activeRefreshes) {
-      const val = r.rates[i];
-      if (val === null || val === undefined) continue;
-      const isRecent = r.hours >= recentCutoff;
-      const ageDecay = Math.exp(-0.045 * Math.max(0, last.hours - r.hours));
-      const w = (isRecent ? 1.5 : 0.4) * ageDecay;
-      obs.push({ logTime: r.logTime, logitVal: logit(val), weight: w });
-      const earnedCnt = (clampPct(val) / 100) * Math.max(1, r.players);
-      elastObs.push({ logTime: Math.log(Math.max(1, r.players)), logitVal: Math.log(earnedCnt + 0.5), weight: w });
-    }
-    const fit = fitWeightedLogTrend(obs);
-    rawTrends[i] = fit;
-    const eFit = fitWeightedLogTrend(elastObs);
-    if (eFit) {
-      rawElasticities[i] = Math.max(0.15, Math.min(3.5, eFit.slope));
-    }
-    if (fit && (last.rates[i] ?? 0) >= 0.08) {
-      const arch = archetypes[i]!;
-      const arr = groupSlopes.get(arch) ?? [];
-      arr.push(Math.max(-1.8, Math.min(2.8, fit.slope)));
-      groupSlopes.set(arch, arr);
-      if (rawElasticities[i] !== null) {
-        const earr = groupElast.get(arch) ?? [];
-        earr.push(rawElasticities[i]!);
-        groupElast.set(arch, earr);
-      }
-    }
-  }
-
-  // Compute robust group median slopes and elasticities for hierarchical shrinkage
-  const groupMedSlope = new Map<Archetype, number>();
-  for (const [arch, arr] of groupSlopes.entries()) {
-    arr.sort((a, b) => a - b);
-    groupMedSlope.set(arch, arr[Math.floor(arr.length / 2)]!);
-  }
-  const groupMedElast = new Map<Archetype, number>();
-  for (const [arch, arr] of groupElast.entries()) {
-    arr.sort((a, b) => a - b);
-    groupMedElast.set(arch, arr[Math.floor(arr.length / 2)]!);
-  }
-
-  // Empirical backtest calibration on the case's own history (if >= 4 post-launch refreshes)
-  let empScale = 1.0;
+  // Step 2: Live expanding-window self-calibration inside the case's own history (directly optimizing pinball loss!)
+  let wLL = 0.28;
+  let wWeib = 0.28;
+  let wLN = 0.28;
+  let wOrg = 0.16;
   let empBias = 0.0;
-  if (activeRefreshes.length >= 4) {
-    const splitIdx = Math.max(2, Math.floor(activeRefreshes.length * 0.65));
-    const trainEnd = activeRefreshes[splitIdx - 1]!;
-    const testEnd = activeRefreshes[activeRefreshes.length - 1]!;
-    const btDx = Math.max(0.05, testEnd.logTime - trainEnd.logTime);
-    const btDLogN = Math.max(0, Math.log(Math.max(1, testEnd.players) / Math.max(1, trainEnd.players)));
-    const btDtH = Math.max(0.5, testEnd.hours - trainEnd.hours);
-    const btAvgN = 0.5 * (trainEnd.players + testEnd.players);
-    const btResids: number[] = [];
-    for (let i = 0; i < nTrophies; i++) {
-      const actualR = testEnd.rates[i];
-      const baseR = trainEnd.rates[i];
-      if (actualR === null || actualR === undefined || baseR === null || baseR === undefined) continue;
-      if (baseR >= 98.5 || baseR <= 0.02) continue;
-      const subObs: Array<{ logTime: number; logitVal: number; weight: number }> = [];
-      for (let k = 0; k < splitIdx; k++) {
-        const rk = activeRefreshes[k]!;
-        const v = rk.rates[i];
-        if (v !== null && v !== undefined) {
-          subObs.push({ logTime: rk.logTime, logitVal: logit(v), weight: Math.exp(-0.04 * (trainEnd.hours - rk.hours)) });
+  let empScale = 1.0;
+  let tailLoMult = 1.0;
+  let tailHiMult = 1.0;
+
+  if (active.length >= 6) {
+    // Pick up to 2 internal backtest cutoffs whose log-time jump approximates fullViews.dxTarget (~0.6 to 1.1)
+    const targetSplitLogTs = [
+      last.logTime - Math.min(1.05, Math.max(0.55, fullViews.dxTarget * 0.90)),
+      last.logTime - Math.min(0.75, Math.max(0.35, fullViews.dxTarget * 0.55)),
+    ];
+    const btPairs: Array<{ views: ViewPredictions; truthRates: Array<number | null> }> = [];
+    const seenIdx = new Set<number>();
+
+    for (const sLogT of targetSplitLogTs) {
+      let bestIdx = -1;
+      let bestDist = Infinity;
+      for (let idx = 3; idx < refreshes.length - 2; idx++) {
+        if (refreshes[idx]!.players < 1500) continue;
+        const dist = Math.abs(refreshes[idx]!.logTime - sLogT);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestIdx = idx;
         }
       }
-      const subFit = fitWeightedLogTrend(subObs);
-      const slope = subFit ? Math.max(-1.5, Math.min(2.2, subFit.slope * 0.78)) : 0;
-      const trendP = logit(baseR) + slope * btDx;
-      // Blend with count-velocity projection on the holdout window
-      let velP = trendP;
-      const ref0 = activeRefreshes[0]!;
-      const r0v = ref0.rates[i];
-      const obsH = Math.max(0.5, trainEnd.hours - ref0.hours);
-      if (r0v !== null && r0v !== undefined) {
-        const c0 = (clampPct(r0v) / 100) * ref0.players;
-        const c1 = (clampPct(baseR) / 100) * trainEnd.players;
-        const haz = Math.max(0, c1 - c0) / (Math.max(1, 0.5 * (ref0.players + trainEnd.players)) * obsH);
-        const projC = c1 + haz * btAvgN * btDtH * Math.pow(Math.max(1, trainEnd.hours) / Math.max(1, testEnd.hours), 0.2);
-        velP = logit(clampPct((100 * projC) / Math.max(1, testEnd.players)));
+      if (bestIdx >= 3 && !seenIdx.has(bestIdx)) {
+        seenIdx.add(bestIdx);
+        const prefix = refreshes.slice(0, bestIdx + 1);
+        const btViews = computeViewsForPrefix(c.trophies, archetypes, prefix, last.hours);
+        btPairs.push({ views: btViews, truthRates: last.rates });
       }
-      const pred = btDLogN > 0.01 ? 0.55 * trendP + 0.45 * velP : trendP;
-      btResids.push(logit(actualR) - pred);
     }
-    if (btResids.length >= 10) {
-      btResids.sort((a, b) => a - b);
-      const medResid = btResids[Math.floor(btResids.length / 2)]!;
-      const absErrs = btResids.map((e) => Math.abs(e - medResid));
-      const maePerRootDx = (absErrs.reduce((a, b) => a + b, 0) / absErrs.length) / Math.sqrt(btDx);
-      // Expected Gaussian MAE is sqrt(2/pi) * sigma ≈ 0.798 * sigma
-      const impliedSigmaPerRootDx = maePerRootDx / 0.798;
-      empScale = Math.max(0.70, Math.min(1.55, impliedSigmaPerRootDx / 0.36));
-      // Gentle bias correction scaled to horizon ratio and capped conservatively
-      empBias = Math.max(-0.10, Math.min(0.10, (medResid / Math.max(0.15, btDx)) * 0.25));
+
+    if (btPairs.length > 0) {
+      const evalBt = (
+        aLL: number, aW: number, aLN: number, aOrg: number,
+        bias: number, scale: number, tLo: number, tHi: number,
+      ): number => {
+        let tot = 0;
+        let cnt = 0;
+        for (const pair of btPairs) {
+          const v = pair.views;
+          for (let i = 0; i < nTrophies; i++) {
+            const y = pair.truthRates[i];
+            if (y === null || y === undefined) continue;
+            const med =
+              aLL * v.vLL[i]! + aW * v.vWeib[i]! + aLN * v.vLN[i]! + aOrg * v.vOrg[i]! +
+              (archetypes[i] === 'prologue' ? 0 : bias * Math.min(1.2, v.dxTarget));
+            const predCnt = Math.max(0.5, (invLogit(med) / 100) * v.predNTarget);
+            const rawSd = Math.sqrt(
+              (0.24 * scale * Math.sqrt(v.dxTarget)) ** 2 +
+              (0.42 * v.residSd[i]! * Math.sqrt(1 + v.dxTarget)) ** 2 +
+              (0.28 * v.viewSpread[i]!) ** 2 +
+              (0.45 / Math.sqrt(predCnt)) ** 2,
+            ) * (v.lastRates[i]! >= 95 ? 0.40 : 1.0);
+            const sd = Math.max(0.08, Math.min(1.40, rawSd));
+            const q = Q_MULT.map((m) => {
+              const sm = m < 0 ? sd * tLo : sd * tHi;
+              return clampScorePct(invLogit(med + m * sm));
+            });
+            tot += pinballItem(y, q);
+            cnt++;
+          }
+        }
+        const meanLoss = tot / Math.max(1, cnt);
+        const reg =
+          0.020 * ((aLL - 0.28) ** 2 + (aW - 0.28) ** 2 + (aLN - 0.28) ** 2 + (aOrg - 0.16) ** 2) +
+          0.025 * bias * bias +
+          0.012 * (scale - 1.0) ** 2 +
+          0.018 * ((tLo - 1.0) ** 2 + (tHi - 1.0) ** 2);
+        return meanLoss + reg;
+      };
+
+      // Stage A: Search convex ensemble weights across all 3 survival families + organic trend/elasticity
+      const weightCandidates: Array<[number, number, number, number]> = [
+        [0.28, 0.28, 0.28, 0.16],
+        [0.65, 0.15, 0.10, 0.10],
+        [0.15, 0.65, 0.10, 0.10],
+        [0.10, 0.15, 0.65, 0.10],
+        [0.05, 0.05, 0.85, 0.05],
+        [0.85, 0.05, 0.05, 0.05],
+        [0.05, 0.85, 0.05, 0.05],
+        [0.42, 0.42, 0.08, 0.08],
+        [0.42, 0.08, 0.42, 0.08],
+        [0.08, 0.42, 0.42, 0.08],
+        [0.20, 0.20, 0.20, 0.40],
+        [0.10, 0.10, 0.15, 0.65],
+      ];
+      let bestScore = Infinity;
+      for (const [cLL, cW, cLN, cOrg] of weightCandidates) {
+        const s = evalBt(cLL, cW, cLN, cOrg, 0, 1.0, 1.0, 1.0);
+        if (s < bestScore) {
+          bestScore = s;
+          wLL = cLL; wWeib = cW; wLN = cLN; wOrg = cOrg;
+        }
+      }
+
+      // Stage B: Optimize global bias and spread scale directly on pinball loss (guard against under-covering long horizon)
+      for (const b of [-0.12, -0.06, -0.03, 0.0, 0.03, 0.06, 0.12]) {
+        for (const sc of [0.85, 1.00, 1.18, 1.38, 1.62, 1.90]) {
+          const s = evalBt(wLL, wWeib, wLN, wOrg, b, sc, 1.0, 1.0);
+          if (s < bestScore) {
+            bestScore = s;
+            empBias = b;
+            empScale = sc;
+          }
+        }
+      }
+
+      // Stage C: Fine-tune asymmetric tail multipliers
+      for (const tLo of [0.88, 0.96, 1.05, 1.18, 1.32]) {
+        for (const tHi of [0.88, 0.96, 1.05, 1.18, 1.32]) {
+          const s = evalBt(wLL, wWeib, wLN, wOrg, empBias, empScale, tLo, tHi);
+          if (s < bestScore) {
+            bestScore = s;
+            tailLoMult = tLo;
+            tailHiMult = tHi;
+          }
+        }
+      }
     }
   }
 
-  // Second pass: 4-view count-consistent ensemble (Cohort Convolution + Count Velocity + Logit Trend + Elasticity)
+  // Step 3: Produce calibrated un-clamped medians & spreads for f00
   const medians = new Array<number>(nTrophies);
   const spreads = new Array<number>(nTrophies);
-
-  // Estimate recent player-hour integral from last.hours to effectiveTargetHours for count-velocity view
-  const dtHorizonH = Math.max(0.5, effectiveTargetHours - last.hours);
-  const avgFutureN = 0.5 * (last.players + traj.nTarget);
+  const v = fullViews;
 
   for (let i = 0; i < nTrophies; i++) {
-    const arch = archetypes[i]!;
-    const prior = ARCHETYPE_PRIORS[arch];
-    const lastRate = clampPct(last.rates[i] ?? 0.5);
-    const lastLogit = logit(lastRate);
-    const lastCount = (lastRate / 100) * last.players;
-    const dxTarget = Math.max(0.01, effectiveTargetLogT - last.logTime);
+    let med =
+      wLL * v.vLL[i]! +
+      wWeib * v.vWeib[i]! +
+      wLN * v.vLN[i]! +
+      wOrg * v.vOrg[i]!;
 
-    // Physical non-decreasing earner-count lower bound (earners cannot un-earn a trophy)
-    const countFloorRate = clampPct((100 * lastCount) / Math.max(1, traj.nTarget));
-    const countFloorLogit = logit(countFloorRate);
-
-    // Extract pre-launch reviewer count offset from the first launch-night snapshot (<1500 players)
-    const firstRef = refreshes[0]!;
-    const preLaunchCount =
-      firstRef.players < 1500 && firstRef.rates[i] !== null && firstRef.rates[i] !== undefined
-        ? Math.round((clampPct(firstRef.rates[i]!) / 100) * firstRef.players)
-        : 0;
-
-    // View 1: Cohort-convolution fit with reviewer-count offset evaluated at effectiveTargetHours
-    const cohortObs: Array<{ hours: number; logitVal: number; weight: number }> = [];
-    for (const r of activeRefreshes) {
-      const v = r.rates[i];
-      if (v === null || v === undefined) continue;
-      const w = Math.exp(-0.035 * Math.max(0, last.hours - r.hours));
-      cohortObs.push({ hours: r.hours, logitVal: logit(v), weight: w });
-    }
-    const cohortFit = fitCohortModel(traj.cohorts, cohortObs, prior, effectiveTargetHours, preLaunchCount);
-
-    // View 2: Hierarchically shrunk damped log-time trend
-    const fit = rawTrends[i];
-    const gSlope = groupMedSlope.get(arch) ?? 0.25;
-    let trendPred = lastLogit;
-    let residSd = 0.18;
-    // Smooth continuous transition for trophies still near the pre-launch reviewer dilution floor
-    const excessRatio = (lastCount - preLaunchCount) / Math.max(12, preLaunchCount * 8);
-    const dilBlend = lastRate >= 0.30 ? 0.0 : Math.max(0.0, Math.min(1.0, 1.0 - excessRatio));
-    const rateReliability = (1 - 0.82 * dilBlend) * (lastRate >= 0.5 ? 1.0 : lastRate >= 0.1 ? 0.65 : 0.30);
-    const nWeight = (activeRefreshes.length / (activeRefreshes.length + 3.0)) * rateReliability;
-    if (fit && dilBlend < 0.85) {
-      const shrunkSlope = nWeight * Math.max(-1.6, Math.min(2.6, fit.slope)) + (1 - nWeight) * gSlope;
-      const damp = shrunkSlope >= 0
-        ? (lastRate > 60 ? 0.55 : lastRate > 30 ? 0.75 : 0.88)
-        : 0.55;
-      const rawTrend = lastLogit + shrunkSlope * damp * dxTarget;
-      trendPred = (1 - dilBlend) * rawTrend + dilBlend * cohortFit.predLogit;
-      residSd = Math.max(fit.residSd, 0.20 * dilBlend);
-    } else if (dilBlend >= 0.85) {
-      trendPred = cohortFit.predLogit;
-      residSd = Math.max(0.22, cohortFit.rmse);
-    } else {
-      trendPred = lastLogit + 0.35 * (logit(prior.week1RatePct) - lastLogit) * Math.min(1, horizonDays / 5);
+    if (archetypes[i] !== 'prologue') {
+      med += empBias * Math.min(1.2, v.dxTarget);
     }
 
-    // View 3: Earner-count elasticity relative to player-pool growth
-    let elastPred = trendPred;
-    const rawEl = rawElasticities[i];
-    if (rawEl !== null && dLogNTarget > 1e-4 && dilBlend < 0.85) {
-      const gEl = groupMedElast.get(arch) ?? 1.15;
-      const shrunkEl = nWeight * rawEl + (1 - nWeight) * gEl;
-      const satDamp = lastRate > 55 ? 0.60 : lastRate > 25 ? 0.80 : 0.92;
-      const effEl = 1.0 + (shrunkEl - 1.0) * satDamp;
-      const rawRateEl = lastRate * Math.exp((effEl - 1.0) * dLogNTarget);
-      const cappedRate = rawRateEl > 70 ? 70 + 29.5 * Math.tanh((rawRateEl - 70) / 35) : rawRateEl;
-      const rawElLogit = logit(clampPct(cappedRate));
-      elastPred = (1 - dilBlend) * rawElLogit + dilBlend * cohortFit.predLogit;
+    // True physical earner-count lower bound (ONLY when lastRates[i] > 0; never invent fake floor for 0.00%!)
+    if (v.lastRates[i]! > 0) {
+      const kFloor = Math.max(v.kPre[i]!, ((v.lastRates[i]! - 0.005) / 100) * last.players);
+      const floorRate = clampRawPct((100 * kFloor) / Math.max(1, v.predNTarget));
+      const floorLogit = logitRaw(floorRate);
+      if (med < floorLogit) med = floorLogit;
     }
 
-    // View 4: Direct count-space earner velocity over recent refreshes with saturation damping
-    let countVelPred = cohortFit.predLogit;
-    if (activeRefreshes.length >= 2 && dilBlend < 0.85) {
-      const refStart = activeRefreshes[Math.max(0, activeRefreshes.length - Math.min(6, activeRefreshes.length))]!;
-      const rStartVal = refStart.rates[i];
-      const dtObs = Math.max(0.25, last.hours - refStart.hours);
-      if (rStartVal !== null && rStartVal !== undefined && dtObs >= 0.5) {
-        const startCount = (clampPct(rStartVal) / 100) * refStart.players;
-        const deltaE = Math.max(0, lastCount - startCount);
-        const avgObsN = Math.max(1, 0.5 * (refStart.players + last.players));
-        // Per-player-hour earn hazard, attenuated gently for weekday/saturation decay
-        const hazard = deltaE / (avgObsN * dtObs);
-        const headroom = Math.max(0.05, 1 - lastRate / (prior.pMax * 100));
-        const timeDecay = Math.pow(Math.max(1, last.hours) / Math.max(1, effectiveTargetHours), 0.25);
-        const projAdded = hazard * avgFutureN * dtHorizonH * timeDecay * Math.min(1.0, headroom * 1.15);
-        const projRate = clampPct((100 * (lastCount + projAdded)) / Math.max(1, traj.nTarget));
-        countVelPred = (1 - dilBlend) * logit(projRate) + dilBlend * cohortFit.predLogit;
-      }
-    }
-
-    // Prologue special stability: if already >92%, anchor tightly near observed ceiling
-    let medLogit: number;
-    if (arch === 'prologue' && lastRate >= 92.0) {
-      medLogit = 0.75 * lastLogit + 0.25 * cohortFit.predLogit;
-    } else {
-      const dataBlend =
-        activeRefreshes.length >= 3
-          ? 0.42 * cohortFit.predLogit + 0.22 * countVelPred + 0.20 * trendPred + 0.16 * elastPred
-          : 0.40 * cohortFit.predLogit + 0.22 * countVelPred + 0.22 * trendPred + 0.16 * elastPred;
-      const priorBlend = 0.70 * cohortFit.predLogit + 0.30 * logit(prior.week1RatePct);
-      medLogit = (1 - dilBlend) * dataBlend + dilBlend * priorBlend;
-    }
-
-    // Apply gentle empirical holdout bias correction and enforce physical earner-count floor
-    if (arch !== 'prologue') {
-      medLogit += empBias * Math.min(1.0, dxTarget);
-    }
-    medLogit = Math.max(countFloorLogit, Math.max(logit(0.01), Math.min(logit(99.99), medLogit)));
-    medians[i] = medLogit;
-
-    // Calibrated per-trophy logit spread combining empirical scale, fit residuals, view disagreement & Poisson count noise
-    const viewMax = Math.max(cohortFit.predLogit, countVelPred, trendPred, elastPred);
-    const viewMin = Math.min(cohortFit.predLogit, countVelPred, trendPred, elastPred);
-    const viewSpread = viewMax - viewMin;
-    const baseLogitSd = 0.27 * empScale * Math.sqrt(dxTarget);
-    const predCount = Math.max(1, (invLogit(medLogit) / 100) * traj.nTarget);
-    const poissonSd = 0.50 / Math.sqrt(predCount);
-    const refreshJitter = 0.08 * (medianGapH / Math.max(24, targetHours));
-    const highRateTighten = lastRate >= 95.0 ? 0.45 : 1.0;
-    const combinedSd = Math.sqrt(
-      baseLogitSd ** 2 +
-      (0.45 * residSd * Math.sqrt(1 + dxTarget)) ** 2 +
-      (0.24 * viewSpread) ** 2 +
-      poissonSd ** 2 +
-      refreshJitter ** 2,
-    ) * highRateTighten;
-
-    spreads[i] = Math.max(0.10, Math.min(1.10, combinedSd));
+    medians[i] = med;
+    const predCnt = Math.max(0.5, (invLogit(med) / 100) * v.predNTarget);
+    const refreshJitter = 0.06 * (medianGapH / Math.max(24, targetHours));
+    // Account for extrapolation uncertainty growth beyond internal backtest horizon
+    const horizonInflate = 1.0 + 0.12 * Math.max(0, v.dxTarget - 0.5);
+    const rawSd =
+      Math.sqrt(
+        (0.28 * empScale * horizonInflate * Math.sqrt(v.dxTarget)) ** 2 +
+        (0.45 * v.residSd[i]! * Math.sqrt(1 + v.dxTarget)) ** 2 +
+        (0.36 * v.viewSpread[i]!) ** 2 +
+        (0.48 / Math.sqrt(predCnt)) ** 2 +
+        refreshJitter ** 2,
+      ) * (v.lastRates[i]! >= 95 ? 0.42 : 1.0);
+    spreads[i] = Math.max(0.11, Math.min(1.50, rawSd));
   }
 
-  // Macro trophies_earned consistency anchor (soft pull when multi-refresh history shows clear macro trend)
-  if (activeRefreshes.length >= 3 && last.earned > 0 && last.players > 0) {
-    const macroObs = activeRefreshes
+  // Step 4: Soft macro trophies_earned consistency anchor
+  if (active.length >= 4 && last.earned > 0 && last.players > 0) {
+    const macroObs = active
       .filter((r) => r.earned > 0 && r.players > 0)
       .map((r) => ({
-        logTime: r.logTime,
-        logitVal: Math.log(r.earned / r.players),
-        weight: Math.exp(-0.03 * Math.max(0, last.hours - r.hours)),
+        x: r.logTime,
+        y: Math.log(r.earned / r.players),
+        w: Math.exp(-0.03 * Math.max(0, last.hours - r.hours)),
       }));
-    const macroFit = fitWeightedLogTrend(macroObs);
-    if (macroFit) {
-      const dxM = Math.max(0.01, effectiveTargetLogT - last.logTime);
-      const dampSlope = Math.max(-0.5, Math.min(1.8, macroFit.slope)) * 0.72;
-      const targetAvgTrophies = (last.earned / last.players) * Math.exp(dampSlope * dxM);
+    const mFit = fitWeightedLinear(macroObs);
+    if (mFit) {
+      const dampSlope = Math.max(-0.4, Math.min(1.6, mFit.slope)) * 0.72;
+      const targetAvg = (last.earned / last.players) * Math.exp(dampSlope * v.dxTarget);
       let predSum = 0;
       for (let i = 0; i < nTrophies; i++) predSum += invLogit(medians[i]!) / 100;
-      if (predSum > 0.5 && targetAvgTrophies > 0.5) {
-        const logRatio = Math.max(-0.25, Math.min(0.25, Math.log(targetAvgTrophies / predSum)));
+      if (predSum > 0.5 && targetAvg > 0.5) {
+        const logRatio = Math.max(-0.22, Math.min(0.22, Math.log(targetAvg / predSum)));
         for (let i = 0; i < nTrophies; i++) {
           if (archetypes[i] === 'prologue') continue;
-          medians[i] = Math.max(logit(0.01), Math.min(logit(99.99), medians[i]! + 0.18 * logRatio));
+          medians[i] = medians[i]! + 0.14 * logRatio;
         }
       }
     }
   }
 
-  // Third pass: structural monotonicity constraints (story chain & platinum <= min(others))
-  // Find indices of core story chain in strict order
-  const storyOrder: Archetype[] = ['prologue', 'ch1', 'ch2', 'ch3', 'ch4', 'finale', 'completion_100', 'platinum'];
-  const chainIndices: number[] = [];
-  for (const a of storyOrder) {
-    const idx = archetypes.findIndex((x) => x === a);
-    if (idx !== -1) chainIndices.push(idx);
-  }
-  // Soft isotonic enforcement along the main story chain (non-increasing)
-  for (let pass = 0; pass < 3; pass++) {
-    for (let j = 1; j < chainIndices.length; j++) {
-      const prevIdx = chainIndices[j - 1]!;
-      const curIdx = chainIndices[j]!;
-      if (medians[curIdx]! > medians[prevIdx]!) {
-        const avg = 0.5 * (medians[prevIdx]! + medians[curIdx]!);
-        medians[prevIdx] = avg;
-        medians[curIdx] = avg;
-      }
-    }
-  }
-  // Platinum cannot exceed the rarest non-platinum trophy's median
-  const platIdx = archetypes.indexOf('platinum');
-  if (platIdx !== -1) {
-    let minOther = Infinity;
-    for (let i = 0; i < nTrophies; i++) {
-      if (i !== platIdx && medians[i]! < minOther) minOther = medians[i]!;
-    }
-    if (medians[platIdx]! > minOther) {
-      medians[platIdx] = minOther;
-    }
-  }
-
-  return c.trophies.map((t, i) => {
+  // Step 5: Compute boundary-optimal quantiles (clamping AFTER normal/t quantiles in un-clamped logit space!)
+  const qMatrix: number[][] = c.trophies.map((_, i) => {
     const med = medians[i]!;
     const sd = spreads[i]!;
-    const q = Q_MULT.map((m) => round4(clampPct(invLogit(med + m * sd))));
-    for (let k = 1; k < q.length; k++) {
-      if (q[k]! < q[k - 1]!) q[k] = q[k - 1]!;
-    }
-    return { id: t.id, q };
+    return Q_MULT.map((m) => {
+      const sm = m < 0 ? sd * tailLoMult : sd * tailHiMult;
+      return clampScorePct(invLogit(med + m * sm));
+    });
   });
+
+  // Step 6: Enforce full GTA VI story & 100%/Platinum prerequisite DAG monotonicity across all 5 quantiles
+  enforceDagMonotonicity(c.trophies, qMatrix);
+
+  return c.trophies.map((t, i) => ({ id: t.id, q: qMatrix[i]! }));
 }
 
 mkdirSync(OUTPUT_DIR, { recursive: true });
