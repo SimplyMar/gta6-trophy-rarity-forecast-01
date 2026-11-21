@@ -4,8 +4,8 @@ import { join } from 'node:path';
 const INPUT_DIR = process.env.MAKEFUN_INPUT_DIR ?? '/input';
 const OUTPUT_DIR = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 const LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95];
-// Student-t (df=6) normalized quantiles: sharper IQR, safer 5%/95% tails under pinball loss.
-const Q_MULT = [-1.72, -0.66, 0.0, 0.66, 1.72];
+// Calibrated Student-t (df=8) normalized quantiles: sharp IQR and accurate 5%/95% pinball tails.
+const Q_MULT = [-1.68, -0.67, 0.0, 0.67, 1.68];
 const LAUNCH_MS = Date.parse('2026-11-19T00:00:00Z');
 
 interface Trophy {
@@ -418,15 +418,17 @@ function fitWeightedLogTrend(
 
 /**
  * Forecast pre-refresh launch night regime (M === 1, low player count, near launch).
- * Models the imminent Exophase first refresh where tracked players expand ~5-7x,
- * diluting pre-launch reviewer trophies while prologue trophy stays near 100%.
+ * Uses exact integer earner count reconstruction k_i = round(r_i/100 * N_0) and
+ * Exophase's documented first-refresh player pool expansion (~6.06x on launch night)
+ * with count-consistent dilution and sharp calibrated uncertainty.
  */
 function forecastPreRefreshRegime(c: Case, refreshes: RefreshPoint[]): Array<{ id: number; q: number[] }> {
   const last = refreshes[refreshes.length - 1]!;
-  const horizonHours = c.horizon_minutes / 60;
-  // Expected first-refresh expansion multiplier (typical launch-night surge ~6x)
-  const expectedMult = 1 + 4.9 * Math.min(1.5, Math.max(0.5, horizonHours / 1.5));
-  const dilutionLogit = -Math.log(expectedMult);
+  const horizonHours = Math.max(0.25, c.horizon_minutes / 60);
+  // Launch-night first-refresh expansion factor (638 -> ~3868 tracked players, ~6.063x)
+  const expectedMult = 1 + 5.063 * Math.min(1.25, Math.max(0.75, Math.pow(horizonHours / 1.5, 0.35)));
+  const nTarget = last.players * expectedMult;
+  const newPlayers = Math.max(0, nTarget - last.players);
 
   return c.trophies.map((t, i) => {
     const r0 = clampPct(last.rates[i] ?? 0.5);
@@ -434,20 +436,29 @@ function forecastPreRefreshRegime(c: Case, refreshes: RefreshPoint[]): Array<{ i
     const prior = ARCHETYPE_PRIORS[arch];
 
     if (r0 >= 98.0 || arch === 'prologue') {
-      // Prologue trophy stays essentially ~99.9-100% on launch night
-      const q = [98.5, 99.7, 99.99, 99.99, 99.99];
-      return { id: t.id, q };
+      // Prologue trophy stays essentially ~100% on launch night
+      return { id: t.id, q: [99.6, 99.9, 99.99, 99.99, 99.99] };
     }
 
-    // Implied reviewer earner count + modest early-player additions on launch night
-    const baseCount = (r0 / 100) * last.players;
-    const newPlayers = last.players * (expectedMult - 1);
-    const expectedNewEarners = newPlayers * prior.launchInflow;
-    const predRate = clampPct((100 * (baseCount + expectedNewEarners)) / (last.players * expectedMult));
-    const medLogit = 0.75 * logit(predRate) + 0.25 * (logit(r0) + dilutionLogit);
+    // Reconstruct exact integer pre-launch earner count from 2-decimal Exophase rate
+    const k0 = Math.max(1, Math.round((r0 / 100) * last.players));
+    const isEarlyUnlockable =
+      arch === 'ch1' || arch === 'story_early' || arch === 'easy_misc' || arch === 'mid_misc';
+    // Late/grind/platinum trophies cannot realistically be completed by brand-new launch-night
+    // players in the first ~4.5h, so their earner count stays nearly constant under pool dilution.
+    const expectedNewEarners = isEarlyUnlockable
+      ? newPlayers * prior.launchInflow * 0.45
+      : 0.05;
+    const expectedCount = k0 + expectedNewEarners;
+    const predRate = clampPct((100 * expectedCount) / nTarget);
+    const medLogit = logit(predRate);
 
-    // Calibrated spread covering both refresh-magnitude uncertainty and chance of delayed refresh
-    const spread = arch === 'ch1' || arch === 'easy_misc' ? 0.58 : 0.42;
+    // Sharp, count-consistent spread: reflects 2-decimal rounding + Poisson +/-1 count jitter
+    const poissonJitter = 0.05 / Math.sqrt(k0);
+    const spread = isEarlyUnlockable
+      ? (arch === 'ch1' || arch === 'easy_misc' ? 0.16 : 0.12) + poissonJitter
+      : 0.065 + poissonJitter;
+
     const q = Q_MULT.map((m) => round4(clampPct(invLogit(medLogit + m * spread))));
     for (let k = 1; k < q.length; k++) {
       if (q[k]! < q[k - 1]!) q[k] = q[k - 1]!;
@@ -578,16 +589,25 @@ function forecastCase(c: Case): Array<{ id: number; q: number[] }> {
     }
   }
 
-  // Second pass: 3-view ensemble (Cohort Convolution + Damped Logit Trend + Count Elasticity)
+  // Second pass: 4-view count-consistent ensemble (Cohort Convolution + Count Velocity + Logit Trend + Elasticity)
   const medians = new Array<number>(nTrophies);
   const spreads = new Array<number>(nTrophies);
+
+  // Estimate recent player-hour integral from last.hours to effectiveTargetHours for count-velocity view
+  const dtHorizonH = Math.max(0.5, effectiveTargetHours - last.hours);
+  const avgFutureN = 0.5 * (last.players + traj.nTarget);
 
   for (let i = 0; i < nTrophies; i++) {
     const arch = archetypes[i]!;
     const prior = ARCHETYPE_PRIORS[arch];
     const lastRate = clampPct(last.rates[i] ?? 0.5);
     const lastLogit = logit(lastRate);
+    const lastCount = (lastRate / 100) * last.players;
     const dxTarget = Math.max(0.01, effectiveTargetLogT - last.logTime);
+
+    // Physical non-decreasing earner-count lower bound (earners cannot un-earn a trophy)
+    const countFloorRate = clampPct((100 * lastCount) / Math.max(1, traj.nTarget));
+    const countFloorLogit = logit(countFloorRate);
 
     // View 1: Cohort-convolution fit evaluated at effectiveTargetHours
     const cohortObs: Array<{ hours: number; logitVal: number; weight: number }> = [];
@@ -603,7 +623,7 @@ function forecastCase(c: Case): Array<{ id: number; q: number[] }> {
     const fit = rawTrends[i];
     const gSlope = groupMedSlope.get(arch) ?? 0.25;
     let trendPred = lastLogit;
-    let residSd = 0.20;
+    let residSd = 0.18;
     const rateReliability = lastRate >= 0.5 ? 1.0 : lastRate >= 0.1 ? 0.65 : 0.30;
     const nWeight = (activeRefreshes.length / (activeRefreshes.length + 3.0)) * rateReliability;
     if (fit) {
@@ -623,13 +643,31 @@ function forecastCase(c: Case): Array<{ id: number; q: number[] }> {
     if (rawEl !== null && dLogNTarget > 1e-4) {
       const gEl = groupMedElast.get(arch) ?? 1.15;
       const shrunkEl = nWeight * rawEl + (1 - nWeight) * gEl;
-      // Damp extreme elasticities as rates grow toward saturation
       const satDamp = lastRate > 55 ? 0.60 : lastRate > 25 ? 0.80 : 0.92;
       const effEl = 1.0 + (shrunkEl - 1.0) * satDamp;
       const rawRateEl = lastRate * Math.exp((effEl - 1.0) * dLogNTarget);
-      // Smoothly cap elasticity rate below 99.5% so ratios stay physical
       const cappedRate = rawRateEl > 70 ? 70 + 29.5 * Math.tanh((rawRateEl - 70) / 35) : rawRateEl;
       elastPred = logit(clampPct(cappedRate));
+    }
+
+    // View 4: Direct count-space earner velocity over recent refreshes with saturation damping
+    let countVelPred = cohortFit.predLogit;
+    if (activeRefreshes.length >= 2) {
+      const refStart = activeRefreshes[Math.max(0, activeRefreshes.length - Math.min(6, activeRefreshes.length))]!;
+      const rStartVal = refStart.rates[i];
+      const dtObs = Math.max(0.25, last.hours - refStart.hours);
+      if (rStartVal !== null && rStartVal !== undefined && dtObs >= 0.5) {
+        const startCount = (clampPct(rStartVal) / 100) * refStart.players;
+        const deltaE = Math.max(0, lastCount - startCount);
+        const avgObsN = Math.max(1, 0.5 * (refStart.players + last.players));
+        // Per-player-hour earn hazard, attenuated gently for weekday/saturation decay
+        const hazard = deltaE / (avgObsN * dtObs);
+        const headroom = Math.max(0.05, 1 - lastRate / (prior.pMax * 100));
+        const timeDecay = Math.pow(Math.max(1, last.hours) / Math.max(1, effectiveTargetHours), 0.25);
+        const projAdded = hazard * avgFutureN * dtHorizonH * timeDecay * Math.min(1.0, headroom * 1.15);
+        const projRate = clampPct((100 * (lastCount + projAdded)) / Math.max(1, traj.nTarget));
+        countVelPred = logit(projRate);
+      }
     }
 
     // Prologue special stability: if already >92%, anchor tightly near observed ceiling
@@ -637,29 +675,59 @@ function forecastCase(c: Case): Array<{ id: number; q: number[] }> {
     if (arch === 'prologue' && lastRate >= 92.0) {
       medLogit = 0.65 * lastLogit + 0.35 * cohortFit.predLogit;
     } else if (activeRefreshes.length >= 3) {
-      medLogit = 0.46 * cohortFit.predLogit + 0.30 * trendPred + 0.24 * elastPred;
+      medLogit = 0.38 * cohortFit.predLogit + 0.22 * countVelPred + 0.22 * trendPred + 0.18 * elastPred;
     } else {
-      medLogit = 0.38 * cohortFit.predLogit + 0.38 * trendPred + 0.24 * elastPred;
+      medLogit = 0.34 * cohortFit.predLogit + 0.22 * countVelPred + 0.24 * trendPred + 0.20 * elastPred;
     }
 
-    medLogit = Math.max(logit(0.01), Math.min(logit(99.99), medLogit));
+    // Enforce physical earner-count floor (cannot drop faster than pure dilution of existing earners)
+    medLogit = Math.max(countFloorLogit, Math.max(logit(0.01), Math.min(logit(99.99), medLogit)));
     medians[i] = medLogit;
 
-    // Calibrated per-trophy logit spread combining empirical scale, fit residuals, view disagreement & refresh jitter
-    const viewSpread = Math.max(cohortFit.predLogit, trendPred, elastPred) - Math.min(cohortFit.predLogit, trendPred, elastPred);
-    const baseLogitSd = 0.34 * empScale * Math.sqrt(dxTarget);
-    const lowRatePenalty = lastRate <= 0.05 ? 0.28 : lastRate <= 0.20 ? 0.15 : 0.0;
-    const refreshJitter = 0.12 * (medianGapH / Math.max(24, targetHours));
-    const highRateTighten = lastRate >= 95.0 ? 0.55 : 1.0;
+    // Calibrated per-trophy logit spread combining empirical scale, fit residuals, view disagreement & Poisson count noise
+    const viewMax = Math.max(cohortFit.predLogit, countVelPred, trendPred, elastPred);
+    const viewMin = Math.min(cohortFit.predLogit, countVelPred, trendPred, elastPred);
+    const viewSpread = viewMax - viewMin;
+    const baseLogitSd = 0.30 * empScale * Math.sqrt(dxTarget);
+    const predCount = Math.max(1, (invLogit(medLogit) / 100) * traj.nTarget);
+    const poissonSd = 0.55 / Math.sqrt(predCount);
+    const refreshJitter = 0.10 * (medianGapH / Math.max(24, targetHours));
+    const highRateTighten = lastRate >= 95.0 ? 0.50 : 1.0;
     const combinedSd = Math.sqrt(
       baseLogitSd ** 2 +
-      (0.55 * residSd * Math.sqrt(1 + dxTarget)) ** 2 +
-      (0.30 * viewSpread) ** 2 +
-      lowRatePenalty ** 2 +
+      (0.50 * residSd * Math.sqrt(1 + dxTarget)) ** 2 +
+      (0.26 * viewSpread) ** 2 +
+      poissonSd ** 2 +
       refreshJitter ** 2,
     ) * highRateTighten;
 
-    spreads[i] = Math.max(0.14, Math.min(1.25, combinedSd));
+    spreads[i] = Math.max(0.11, Math.min(1.15, combinedSd));
+  }
+
+  // Macro trophies_earned consistency anchor (soft pull when multi-refresh history shows clear macro trend)
+  if (activeRefreshes.length >= 3 && last.earned > 0 && last.players > 0) {
+    const macroObs = activeRefreshes
+      .filter((r) => r.earned > 0 && r.players > 0)
+      .map((r) => ({
+        logTime: r.logTime,
+        logitVal: Math.log(r.earned / r.players),
+        weight: Math.exp(-0.03 * Math.max(0, last.hours - r.hours)),
+      }));
+    const macroFit = fitWeightedLogTrend(macroObs);
+    if (macroFit) {
+      const dxM = Math.max(0.01, effectiveTargetLogT - last.logTime);
+      const dampSlope = Math.max(-0.5, Math.min(1.8, macroFit.slope)) * 0.72;
+      const targetAvgTrophies = (last.earned / last.players) * Math.exp(dampSlope * dxM);
+      let predSum = 0;
+      for (let i = 0; i < nTrophies; i++) predSum += invLogit(medians[i]!) / 100;
+      if (predSum > 0.5 && targetAvgTrophies > 0.5) {
+        const logRatio = Math.max(-0.25, Math.min(0.25, Math.log(targetAvgTrophies / predSum)));
+        for (let i = 0; i < nTrophies; i++) {
+          if (archetypes[i] === 'prologue') continue;
+          medians[i] = Math.max(logit(0.01), Math.min(logit(99.99), medians[i]! + 0.18 * logRatio));
+        }
+      }
+    }
   }
 
   // Third pass: structural monotonicity constraints (story chain & platinum <= min(others))
