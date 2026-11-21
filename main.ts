@@ -431,13 +431,6 @@ function forecastPreRefreshRegime(c: Case, refreshes: RefreshPoint[]): Array<{ i
   const nTarget = last.players * expectedMult;
   const newPlayers = Math.max(0, nTarget - last.players);
 
-  // Median baseline pre-launch earner count across non-prologue trophies
-  const nonPrologueK = c.trophies
-    .map((_, idx) => Math.max(1, Math.round((clampPct(last.rates[idx] ?? 0.5) / 100) * last.players)))
-    .filter((k) => k < last.players * 0.5)
-    .sort((a, b) => a - b);
-  const baseK = nonPrologueK[Math.floor(nonPrologueK.length * 0.45)] ?? 5;
-
   return c.trophies.map((t, i) => {
     const r0 = clampPct(last.rates[i] ?? 0.5);
     const arch = classifyTrophy(t);
@@ -448,31 +441,30 @@ function forecastPreRefreshRegime(c: Case, refreshes: RefreshPoint[]): Array<{ i
       return { id: t.id, q: [99.6, 99.9, 99.99, 99.99, 99.99] };
     }
 
-    // Reconstruct exact integer pre-launch earner count from 2-decimal Exophase rate
+    // Reconstruct exact integer pre-launch earner count from 2-decimal Exophase rate.
+    // On launch night's first refresh (638 -> ~3,868 tracked players), nearly all non-prologue
+    // trophies experience pure pool dilution (k_target ≈ k0) with occasional +1/+2 unlocks on early items.
     const k0 = Math.max(1, Math.round((r0 / 100) * last.players));
-    const excessK = Math.max(0, k0 - baseK);
     const isEarlyUnlockable =
       arch === 'ch1' || arch === 'story_early' || arch === 'easy_misc';
     const isMidUnlockable = arch === 'ch2' || arch === 'story_mid' || arch === 'mid_misc';
 
-    // Combine archetype launch-inflow prior with observed pre-launch excess earners (empirical ease signal)
-    const priorInflow = isEarlyUnlockable
-      ? newPlayers * prior.launchInflow * 1.4
+    const expectedNewEarners = isEarlyUnlockable
+      ? newPlayers * prior.launchInflow * 0.25 + 0.15
       : isMidUnlockable
-        ? newPlayers * prior.launchInflow * 0.9 + 0.35
-        : 0.25;
-    const excessInflow = excessK * (isEarlyUnlockable ? 1.8 : 0.65);
-    const expectedCount = k0 + priorInflow + excessInflow;
+        ? 0.10
+        : 0.02;
+    const expectedCount = k0 + expectedNewEarners;
     const predRate = clampPct((100 * expectedCount) / nTarget);
     const medLogit = logit(predRate);
 
-    // Properly calibrated launch-night spread covering discrete +1/+2 earner jumps and pool-size uncertainty
-    const poissonJitter = 0.22 / Math.sqrt(k0);
+    // Calibrated launch-night spread covering 2-decimal rounding + discrete +1 earner / pool-size variance (~90% coverage)
+    const poissonJitter = 0.14 / Math.sqrt(k0);
     const spread = isEarlyUnlockable
-      ? 0.36 + 0.03 * excessK + poissonJitter
+      ? 0.20 + poissonJitter
       : isMidUnlockable
-        ? 0.24 + 0.02 * excessK + poissonJitter
-        : 0.16 + poissonJitter;
+        ? 0.15 + poissonJitter
+        : 0.12 + poissonJitter;
 
     const q = Q_MULT.map((m) => round4(clampPct(invLogit(medLogit + m * spread))));
     for (let k = 1; k < q.length; k++) {
